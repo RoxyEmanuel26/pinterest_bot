@@ -150,7 +150,6 @@ def load_config(config_path: str) -> dict:
         acc.setdefault("hashtag_custom", [])
         acc.setdefault("link_url", "")
         acc.setdefault("deskripsi_template", "")
-        acc.setdefault("topics", [])   # ← topics/tag Pinterest, maks 10
 
     return config
 
@@ -495,17 +494,12 @@ def run_bot():
 
                 link_url = current_account.get("link_url", "")
 
-                # ← TOPICS: ambil dari config akun, default list kosong
-                topics = current_account.get("topics", [])
-
                 # ----- 7e: Upload pin -----
                 print_info(f"📤 Uploading: {filename}")
                 print_info(f"   Judul: {title}")
                 print_info(f"   Board: {current_account['board']}")
                 if link_url:
                     print_info(f"   Link: {link_url}")
-                if topics:
-                    print_info(f"   Topik: {', '.join(topics)}")
 
                 upload_start = time.time()
 
@@ -516,7 +510,6 @@ def run_bot():
                     description=description,
                     board_name=current_account["board"],
                     link_url=link_url,
-                    topics=topics,          # ← dikirim ke upload_with_retry
                     max_retries=3,
                 )
 

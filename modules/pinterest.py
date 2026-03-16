@@ -190,67 +190,7 @@ def _fill(driver, el, text: str) -> None:
             pass
 
 
-def _fill_topics(driver, topics: list) -> None:
-    """
-    Isi field Topik/Tag di Pinterest.
-    Pinterest menggunakan input text biasa lalu muncul autocomplete.
-    Ketik topik → tekan Enter untuk konfirmasi tiap topik.
-    Maksimum 10 topik per pin.
-    """
-    topic_selectors = [
-        'input[data-test-id="pin-draft-topic-input"]',
-        'input[placeholder*="Cari topik" i]',
-        'input[placeholder*="Search topics" i]',
-        'input[placeholder*="topik" i]',
-        'input[placeholder*="topic" i]',
-        'input[placeholder*="Add tag" i]',
-        'input[placeholder*="Tambah tag" i]',
-    ]
 
-    tf = _find_visible(driver, topic_selectors)
-    if not tf:
-        # Coba scroll ke bawah dulu, mungkin field topik ada di bawah
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
-        time.sleep(0.1)
-        tf = _find_visible(driver, topic_selectors)
-
-    if not tf:
-        print_warning("Field topik tidak ditemukan, skip.")
-        return
-
-    for topic in topics[:10]:
-        try:
-            tf.click()
-            tf.clear()
-            tf.send_keys(topic)
-            time.sleep(0.2)  # Tunggu autocomplete muncul
-
-            # Coba klik suggestion pertama
-            suggestion_found = False
-            for sel in [
-                'div[data-test-id="pin-draft-topic-suggestion"]',
-                'div[role="option"]',
-                'li[role="option"]',
-                '[data-test-id*="topic"] [role="option"]',
-            ]:
-                opts = driver.find_elements(By.CSS_SELECTOR, sel)
-                if opts:
-                    try:
-                        driver.execute_script(_JS_SCROLL_CLICK, opts[0])
-                        suggestion_found = True
-                        time.sleep(0.3)
-                        break
-                    except Exception:
-                        continue
-
-            if not suggestion_found:
-                # Tidak ada suggestion → konfirmasi dengan Enter
-                tf.send_keys(Keys.RETURN)
-                time.sleep(0.3)
-
-        except Exception as e:
-            print_warning(f"Gagal isi topik '{topic}': {e}")
-            continue
 
 
 # ══════════════════════════════════════════════════════════════
@@ -443,21 +383,13 @@ def _select_board(driver, board_name: str) -> bool:
 
 def upload_pin(driver, image_path: str, title: str,
                description: str, board_name: str,
-               link_url: str = "",
-               topics: list = None) -> bool:
+               link_url: str = "") -> bool:
     """
     Upload pin ke Pinterest secara instan.
     - Semua field diisi via JS (bukan ngetik per karakter)
     - Deskripsi pakai execCommand('insertText') agar React terbaca
-    - Topik diisi satu per satu dengan konfirmasi Enter/suggestion
-    - Estimasi: 15-25 detik per pin
-
-    Parameter:
-        topics: list topik/tag, maks 10. Contoh: ['fashion', 'wanita', 'style']
-                Jika None atau [], bagian topik dilewati.
+    - Semua field -> tunggu minimal
     """
-    if topics is None:
-        topics = []
 
     try:
         # ── 1. Buka halaman create pin ──────────────────────────────
@@ -553,14 +485,10 @@ def upload_pin(driver, image_path: str, title: str,
             else:
                 print_warning("Field tautan tidak ditemukan")
 
-        # ── 6. Isi Topik/Tag ────────────────────────────────────────
-        if topics:
-            _fill_topics(driver, topics)
-
-        # ── 7. Pilih Board ──────────────────────────────────────────
+        # ── 6. Pilih Board ──────────────────────────────────────────
         _select_board(driver, board_name)
 
-        # ── 8. Klik Publish ─────────────────────────────────────────
+        # ── 7. Klik Publish (Tunggu gambar siap) ──────────────────────
         published = False
         publish_selectors = [
             'button[data-test-id="board-dropdown-save-button"]',
@@ -572,16 +500,27 @@ def upload_pin(driver, image_path: str, title: str,
             'button[aria-label="Save"]',
         ]
 
-        pub_btn = _wait_for_visible(driver, publish_selectors, timeout=10)
-        if pub_btn:
-            driver.execute_script(_JS_SCROLL_CLICK, pub_btn)
-            published = True
-
+        wait30 = WebDriverWait(driver, 30)
+        
+        # Pinterest disable tombol Save/Publish selama gambar masih diupload.
+        # Kita harus tunggu sampai elemen tersebut Clickable.
+        for selector in publish_selectors:
+            try:
+                pub_btn = wait30.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
+                if pub_btn and pub_btn.is_displayed():
+                    pub_btn.click()
+                    published = True
+                    break
+            except (TimeoutException, NoSuchElementException, ElementNotInteractableException):
+                continue
+                
+        # Jika belum terklik, coba cari dengan fallback text
         if not published:
             for btn in driver.find_elements(By.TAG_NAME, 'button'):
                 try:
                     if btn.text.strip().lower() in ('terbitkan', 'simpan', 'publish', 'save'):
-                        if btn.is_displayed() and btn.is_enabled():
+                        # Jangan klik jika button aria-disabled (sedang upload)
+                        if btn.is_displayed() and btn.is_enabled() and btn.get_attribute('aria-disabled') != 'true':
                             driver.execute_script(_JS_SCROLL_CLICK, btn)
                             published = True
                             break
@@ -589,11 +528,25 @@ def upload_pin(driver, image_path: str, title: str,
                     continue
 
         if not published:
-            print_error("Tombol Publish tidak ditemukan")
+            print_error("Tombol Publish tidak ditemukan / gagal diklik")
             return False
 
-        # ── 9. Tunggu konfirmasi upload selesai ─────────────────────
+        # ── 8. Tunggu konfirmasi upload selesai (Toast) ──────────────
         time.sleep(3)
+        try:
+            val_toast = WebDriverWait(driver, 5).until(EC.presence_of_element_located((
+                By.CSS_SELECTOR, 'div[data-test-id="toast"], div[class*="success"], span[class*="success"]'
+            )))
+        except TimeoutException:
+            pass # Kadang toast terlewat atau lambat, kita anggap success
+            
+        # Pindah ke home/create pin awal untuk reset state
+        try:
+            driver.get(PINTEREST_CREATE_PIN)
+            time.sleep(1)
+        except Exception:
+            pass
+            
         return True
 
     except Exception as e:
@@ -604,17 +557,14 @@ def upload_pin(driver, image_path: str, title: str,
 def upload_with_retry(driver, image_path: str, title: str,
                       description: str, board_name: str,
                       link_url: str = "",
-                      topics: list = None,
                       max_retries: int = 3) -> bool:
     """Upload pin dengan retry otomatis."""
-    if topics is None:
-        topics = []
 
     for attempt in range(1, max_retries + 1):
         try:
             print_info(f"Upload attempt {attempt}/{max_retries}: {os.path.basename(image_path)}")
             if upload_pin(driver, image_path, title, description,
-                          board_name, link_url, topics):
+                          board_name, link_url):
                 return True
             if attempt < max_retries:
                 backoff = attempt * random.uniform(1.0, 4.0)
