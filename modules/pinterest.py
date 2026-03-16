@@ -142,24 +142,45 @@ def _wait_for_any(driver, css_list: list, timeout: int = 25):
 # ─────────────────────────────────────────────
 
 def is_logged_in(driver) -> bool:
-    """Cek apakah sesi Pinterest masih aktif."""
+    """
+    Cek apakah sesi Pinterest masih aktif TANPA navigasi ke home.
+    Cukup cek URL dan elemen di halaman yang sedang dibuka.
+    Jika URL adalah login page → False.
+    Jika ada elemen header Pinterest → True.
+    """
     try:
-        driver.get(PINTEREST_HOME)
-        time.sleep(2)
-        if "/login" in driver.current_url:
+        url = driver.current_url
+
+        # Jika sudah di halaman login / belum login
+        if "/login" in url or "/reset" in url:
             return False
-        indicators = [
+
+        # Jika halaman masih blank / about:blank → perlu navigasi dulu
+        if not url or url in ("about:blank", "data:,"):
+            driver.get(PINTEREST_HOME)
+            time.sleep(2)
+            url = driver.current_url
+            if "/login" in url:
+                return False
+
+        # Cek elemen header yang hanya muncul saat sudah login
+        for sel in [
             '[data-test-id="header-avatar"]',
             '[data-test-id="headerUserMenuButton"]',
             '[data-test-id="create-button"]',
-        ]
-        for sel in indicators:
+            'button[aria-label="Account and more options"]',
+        ]:
             try:
-                if driver.find_element(By.CSS_SELECTOR, sel):
+                el = driver.find_element(By.CSS_SELECTOR, sel)
+                if el:
                     return True
             except NoSuchElementException:
                 continue
+
+        # Jika tidak ada elemen header tapi juga tidak di halaman login
+        # → kemungkinan halaman sedang load, anggap masih login
         return "/login" not in driver.current_url
+
     except Exception as e:
         print_warning(f"Error cek login: {e}")
         return False
@@ -213,7 +234,7 @@ def login(driver, email: str, password: str) -> bool:
             time.sleep(2)
 
         time.sleep(3)
-        if is_logged_in(driver):
+        if "/login" not in driver.current_url:
             print_success(f"Login berhasil: {email}")
             return True
 
@@ -275,7 +296,6 @@ def _select_board(driver, board_name: str) -> bool:
             except Exception:
                 pass
 
-        # Cari search field board
         sf = _find(driver, [
             'input[data-test-id="board-search-input"]',
             'input[placeholder*="Search"]',
@@ -287,7 +307,6 @@ def _select_board(driver, board_name: str) -> bool:
             sf.send_keys(board_name)
             time.sleep(0.8)
 
-        # Klik nama board
         try:
             opts = driver.find_elements(By.XPATH,
                 f'//div[text()="{board_name}"]|//span[text()="{board_name}"]')
@@ -299,7 +318,6 @@ def _select_board(driver, board_name: str) -> bool:
         except Exception:
             pass
 
-        # Fallback klik opsi pertama
         time.sleep(0.3)
         for sel in [
             'div[data-test-id="boardWithoutSection"]',
@@ -337,11 +355,10 @@ def upload_pin(driver, image_path: str, title: str,
     sehingga harus dicari dengan find_elements tanpa cek is_displayed().
     """
     try:
-        # ── 1. Buka halaman create pin ──────────────────────────────
+        # ── 1. Buka halaman create pin (langsung, tanpa cek home dulu) ──
         driver.get(PINTEREST_CREATE_PIN)
 
         # Tunggu halaman load: cari input[type=file] di DOM (bisa hidden)
-        # Timeout diperbesar ke 30 detik untuk koneksi lambat
         file_input = _wait_for_any(driver, [
             'input[type="file"]',
             'input[accept*="image"]',
@@ -349,10 +366,7 @@ def upload_pin(driver, image_path: str, title: str,
         ], timeout=30)
 
         if not file_input:
-            # Fallback: cek apakah halaman sudah load dengan cara lain
-            # Mungkin Pinterest mengganti struktur halaman
             print_warning("input[type=file] tidak ditemukan, coba fallback...")
-            # Tunggu body load dulu
             time.sleep(3)
             file_input = _find_any(driver, [
                 'input[type="file"]',
@@ -362,12 +376,12 @@ def upload_pin(driver, image_path: str, title: str,
                 print_error("Halaman create pin tidak termuat (input file tidak ada)")
                 return False
 
-        # ── 2. Upload gambar ────────────────────────────────────────
+        # ── 2. Upload gambar ──
         absolute_path = os.path.abspath(image_path)
         file_input.send_keys(absolute_path)
         print_info(f"   Mengirim file: {os.path.basename(image_path)}")
 
-        # Tunggu field judul muncul = tanda gambar sudah diproses oleh Pinterest
+        # Tunggu field judul muncul = tanda gambar sudah diproses
         title_appeared = _wait_for_visible(driver, [
             'input[data-test-id="pin-draft-title"]',
             'input[placeholder="Tambahkan judul"]',
@@ -380,7 +394,7 @@ def upload_pin(driver, image_path: str, title: str,
             print_warning("Field judul tidak muncul setelah upload, lanjutkan...")
             time.sleep(3)
 
-        # ── 3. Isi Judul — instan ───────────────────────────────────
+        # ── 3. Isi Judul — instan ──
         tf = _find(driver, [
             'input[data-test-id="pin-draft-title"]',
             'input[placeholder="Tambahkan judul"]',
@@ -392,7 +406,7 @@ def upload_pin(driver, image_path: str, title: str,
             tf.click()
             _fill(driver, tf, title)
 
-        # ── 4. Isi Deskripsi — instan ───────────────────────────────
+        # ── 4. Isi Deskripsi — instan ──
         df = _find(driver, [
             'textarea[data-test-id="pin-draft-description"]',
             'textarea[placeholder="Ceritakan lebih banyak"]',
@@ -404,7 +418,7 @@ def upload_pin(driver, image_path: str, title: str,
             df.click()
             _fill(driver, df, description)
 
-        # ── 5. Isi Link/Tautan — instan ─────────────────────────────
+        # ── 5. Isi Link/Tautan — instan ──
         if link_url:
             lf = _find(driver, [
                 'input[data-test-id="pin-draft-link"]',
@@ -420,10 +434,10 @@ def upload_pin(driver, image_path: str, title: str,
             else:
                 print_warning("Field tautan tidak ditemukan")
 
-        # ── 6. Pilih Board ──────────────────────────────────────────
+        # ── 6. Pilih Board ──
         _select_board(driver, board_name)
 
-        # ── 7. Klik Publish ─────────────────────────────────────────
+        # ── 7. Klik Publish ──
         wait10 = WebDriverWait(driver, 10)
         published = False
 
@@ -461,7 +475,7 @@ def upload_pin(driver, image_path: str, title: str,
             print_error("Tombol Publish/Terbitkan tidak ditemukan")
             return False
 
-        # ── 8. Tunggu selesai lalu lanjut ───────────────────────────
+        # ── 8. Tunggu selesai ──
         time.sleep(3)
         return True
 
