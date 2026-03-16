@@ -664,6 +664,7 @@ def run_bot():
                     description=description,
                     board_name=current_account["board"],
                     link_url=link_url,
+                    topics=topics,
                     max_retries=3,
                 )
                 
