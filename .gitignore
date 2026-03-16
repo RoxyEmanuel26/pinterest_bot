@@ -1,1 +1,25 @@
+# Konfigurasi (berisi password & token)
 config.json
+
+# Session & log files
+session_state.json
+upload_log.csv
+error_log.txt
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+.DS_Store

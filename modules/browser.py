@@ -152,31 +152,35 @@ def random_delay(min_seconds: float, max_seconds: float) -> None:
     time.sleep(delay)
 
 
-def human_type(element, text: str, min_delay: float = 0.05, 
-               max_delay: float = 0.15) -> None:
+def human_type(element, text: str, min_delay: float = 0.01,
+               max_delay: float = 0.03) -> None:
     """
-    Ketik teks karakter demi karakter dengan kecepatan manusia.
-    
-    Mensimulasikan kecepatan mengetik manusia dengan jeda acak 
-    antara setiap karakter (50-150ms default).
-    
-    Args:
-        element: Selenium WebElement tempat mengetik
-        text: Teks yang akan diketik
-        min_delay: Minimum delay per karakter (detik)
-        max_delay: Maximum delay per karakter (detik)
+    Ketik teks dengan cepat tapi tetap simulasi manusia.
+    Gunakan send_keys langsung untuk teks panjang, karakter per karakter
+    hanya untuk awal agar tidak terdeteksi bot.
     """
-    for char in text:
+    # Ketik 3 karakter pertama pelan (anti-bot detection)
+    for char in text[:3]:
         element.send_keys(char)
-        time.sleep(random.uniform(min_delay, max_delay))
-
-
-def short_delay(min_s: float = 1.0, max_s: float = 3.0) -> None:
-    """
-    Jeda pendek untuk transisi antar langkah.
+        time.sleep(random.uniform(0.05, 0.1))
     
-    Args:
-        min_s: Minimum waktu jeda (detik)
-        max_s: Maximum waktu jeda (detik)
+    # Sisanya langsung sekaligus (jauh lebih cepat)
+    if len(text) > 3:
+        element.send_keys(text[3:])
+    
+    time.sleep(random.uniform(0.1, 0.2))
+
+
+def short_delay(min_s: float = 0.3, max_s: float = 0.8) -> None:
+    """
+    Jeda pendek yang dioptimasi — lebih cepat dari sebelumnya.
+    """
+    time.sleep(random.uniform(min_s, max_s))
+
+
+
+def short_delay(min_s: float = 0.3, max_s: float = 0.8) -> None:
+    """
+    Jeda pendek yang dioptimasi — lebih cepat dari sebelumnya.
     """
     time.sleep(random.uniform(min_s, max_s))
