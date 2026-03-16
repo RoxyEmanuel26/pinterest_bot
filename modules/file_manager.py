@@ -80,12 +80,54 @@ def _get_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
+def _calc_font_size_for_width(text: str, target_width: int,
+                               min_size: int = 16, max_size: int = 500) -> int:
+    """
+    Hitung ukuran font agar lebar teks rendered ≈ target_width piksel.
+    Menggunakan pendekatan iteratif (binary search).
+    
+    Args:
+        text: Teks yang akan diukur
+        target_width: Lebar target dalam piksel
+        min_size: Ukuran font minimum
+        max_size: Ukuran font maksimum
+    
+    Returns:
+        Ukuran font optimal dalam piksel
+    """
+    low, high = min_size, max_size
+    best = min_size
+    
+    while low <= high:
+        mid = (low + high) // 2
+        font = _get_font(mid)
+        
+        # Ukur lebar teks pada ukuran ini
+        try:
+            bbox = font.getbbox(text)
+            tw = bbox[2] - bbox[0]
+        except AttributeError:
+            # Fallback Pillow lama
+            tmp_img = Image.new("RGBA", (1, 1))
+            tmp_draw = ImageDraw.Draw(tmp_img)
+            tw, _ = tmp_draw.textsize(text, font=font)
+        
+        if tw <= target_width:
+            best = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    
+    return best
+
+
 def add_watermark(src_path: str, dst_path: str, text: str = "www.roxy.my.id",
-                  opacity: float = 0.8, font_size_ratio: float = 0.025) -> str:
+                  opacity: float = 0.8, width_ratio: float = 0.5) -> str:
     """
     Tambahkan watermark teks ke foto.
     
-    Watermark diletakkan di pojok kanan bawah dengan padding 20px.
+    Watermark diletakkan di tengah-bawah gambar. Ukuran font dihitung
+    secara dinamis agar lebar teks ≈ width_ratio × lebar gambar.
     Teks putih dengan outline/shadow hitam, semi-transparan.
     
     Args:
@@ -93,7 +135,7 @@ def add_watermark(src_path: str, dst_path: str, text: str = "www.roxy.my.id",
         dst_path: Path foto tujuan (dengan watermark)
         text: Teks watermark
         opacity: Transparansi watermark (0.0 - 1.0)
-        font_size_ratio: Rasio ukuran font terhadap lebar gambar
+        width_ratio: Rasio lebar teks terhadap lebar gambar (0.5 = 50%)
     
     Returns:
         Path foto yang sudah di-watermark
@@ -102,36 +144,37 @@ def add_watermark(src_path: str, dst_path: str, text: str = "www.roxy.my.id",
     img = Image.open(src_path).convert("RGBA")
     width, height = img.size
     
-    # Hitung ukuran font proporsional (2.5% dari lebar gambar)
-    font_size = max(int(width * font_size_ratio), 16)
+    # Hitung ukuran font agar teks ≈ 50% lebar gambar
+    target_text_width = int(width * width_ratio)
+    font_size = _calc_font_size_for_width(text, target_text_width)
     font = _get_font(font_size)
     
     # Buat layer transparent untuk watermark
     watermark_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(watermark_layer)
     
-    # Hitung posisi teks (pojok kanan bawah, padding 20px)
-    padding = 20
+    # Dapatkan ukuran teks
+    padding_bottom = 20
     
-    # Dapatkan ukuran teks menggunakan textbbox
     try:
         bbox = draw.textbbox((0, 0), text, font=font)
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
     except AttributeError:
-        # Fallback untuk Pillow versi lama
         text_width, text_height = draw.textsize(text, font=font)
     
-    x = width - text_width - padding
-    y = height - text_height - padding
+    # Posisi: centered horizontal, dekat bawah
+    x = (width - text_width) // 2
+    y = height - text_height - padding_bottom
     
     # Hitung alpha dari opacity
     alpha = int(255 * opacity)
     
-    # Gambar shadow/outline hitam (offset 2px ke segala arah)
+    # Gambar shadow/outline hitam (offset 3px untuk ukuran besar)
     shadow_color = (0, 0, 0, alpha)
-    for offset_x in range(-2, 3):
-        for offset_y in range(-2, 3):
+    outline_range = max(2, font_size // 30)  # outline lebih tebal untuk font besar
+    for offset_x in range(-outline_range, outline_range + 1):
+        for offset_y in range(-outline_range, outline_range + 1):
             if offset_x == 0 and offset_y == 0:
                 continue
             draw.text((x + offset_x, y + offset_y), text, 
@@ -159,7 +202,6 @@ def add_watermark(src_path: str, dst_path: str, text: str = "www.roxy.my.id",
     elif dst_ext == ".gif":
         watermarked = watermarked.convert("RGB")
         watermarked.save(dst_path, "JPEG", quality=95)
-        # Ubah ekstensi jika GIF dikonversi ke JPEG
         dst_path = os.path.splitext(dst_path)[0] + ".jpg"
     else:
         watermarked = watermarked.convert("RGB")

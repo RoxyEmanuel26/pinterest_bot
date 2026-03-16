@@ -82,7 +82,7 @@ def create_driver(chrome_profile_path: str, headless: bool = False) -> uc.Chrome
     
     # Buat driver dengan undetected-chromedriver
     try:
-        driver = uc.Chrome(options=options, use_subprocess=True)
+        driver = uc.Chrome(options=options, version_main=145, use_subprocess=True)
     except Exception as e:
         print(f"[ERROR] Gagal membuat Chrome driver: {e}")
         print("[INFO] Pastikan Google Chrome terinstal dan versinya kompatibel.")

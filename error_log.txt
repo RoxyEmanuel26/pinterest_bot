@@ -1,0 +1,28 @@
+[2026-03-16 10:25:27] [bimanntara26@gmail.com] [1130825787705136714_1.jpg] ERROR: Chrome driver error: Message: session not created: cannot connect to chrome at 127.0.0.1:45094
+from session not created: This version of ChromeDriver only supports Chrome version 146
+Current browser version is 145.0.7632.117; For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#sessionnotcreatedexception
+Stacktrace:
+	undetected_chromedriver!GetHandleVerifier [0xa6ef73+10893]
+	undetected_chromedriver!GetHandleVerifier [0xa6f0a4+109c4]
+	undetected_chromedriver!(No symbol) [0x852130]
+	undetected_chromedriver!(No symbol) [0x88d642]
+	undetected_chromedriver!(No symbol) [0x88c66c]
+	undetected_chromedriver!(No symbol) [0x882785]
+	undetected_chromedriver!(No symbol) [0x8825a6]
+	undetected_chromedriver!(No symbol) [0x8c9caf]
+	undetected_chromedriver!(No symbol) [0x8c94c7]
+	undetected_chromedriver!(No symbol) [0x8bd896]
+	undetected_chromedriver!(No symbol) [0x890229]
+	undetected_chromedriver!(No symbol) [0x890fe4]
+	undetected_chromedriver!GetHandleVerifier [0xcd20f9+273a19]
+	undetected_chromedriver!GetHandleVerifier [0xccd703+26f023]
+	undetected_chromedriver!GetHandleVerifier [0xceb42b+28cd4b]
+	undetected_chromedriver!GetHandleVerifier [0xa87ee8+29808]
+	undetected_chromedriver!GetHandleVerifier [0xa8fc2d+3154d]
+	undetected_chromedriver!GetHandleVerifier [0xa77998+192b8]
+	undetected_chromedriver!GetHandleVerifier [0xa77b62+19482]
+	undetected_chromedriver!GetHandleVerifier [0xa6127a+2b9a]
+	KERNEL32!BaseThreadInitThunk [0x763a5d49+19]
+	ntdll!RtlInitializeExceptionChain [0x7773d81b+6b]
+	ntdll!RtlGetAppContainerNamedObjectPath [0x7773d7a1+231]
+

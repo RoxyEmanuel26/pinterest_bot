@@ -305,29 +305,79 @@ def send_all_notifications(config: dict, event: str, **kwargs) -> None:
             ],
         )
     
+    elif event == "skip":
+        akun_skip = kwargs.get("akun_skip", "")
+        alasan = kwargs.get("alasan", "unknown")
+        akun_baru = kwargs.get("akun_baru", "tidak ada")
+        foto_gagal = kwargs.get("foto_gagal", "")
+        
+        # Telegram
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tg_message = (
+            f"⚠️ <b>Akun Di-Skip</b>\n\n"
+            f"📅 Waktu: {now}\n"
+            f"👤 Akun: {akun_skip}\n"
+            f"❗ Alasan: {alasan}\n"
+            f"➡️ Akun berikutnya: {akun_baru}\n"
+        )
+        if foto_gagal:
+            tg_message += f"📸 Foto gagal: {foto_gagal}\n"
+        send_telegram(tg_token, tg_chat_id, tg_message)
+        
+        # Discord (warna kuning = warning)
+        fields = [
+            {"name": "👤 Email Akun", "value": akun_skip, "inline": True},
+            {"name": "❗ Alasan Skip", "value": alasan, "inline": True},
+            {"name": "➡️ Akun Berikutnya", "value": akun_baru, "inline": True},
+        ]
+        if foto_gagal:
+            fields.append({"name": "📸 Foto Gagal", "value": foto_gagal, "inline": True})
+        
+        send_discord(
+            discord_url,
+            title="⚠️ Akun Di-Skip",
+            message="Akun tidak bisa digunakan, dilompati ke akun berikutnya.",
+            color=DISCORD_COLOR_YELLOW,
+            fields=fields,
+        )
+    
     elif event == "done":
         total_sukses = kwargs.get("total_sukses", 0)
         total_gagal = kwargs.get("total_gagal", 0)
         durasi = kwargs.get("durasi", "")
         akun_digunakan = kwargs.get("akun_digunakan", [])
+        total_foto = kwargs.get("total_foto", 0)
+        foto_sisa = kwargs.get("foto_sisa", 0)
+        akun_diskip = kwargs.get("akun_diskip", [])
         
         # Telegram
         notify_done(tg_token, tg_chat_id, total_sukses, total_gagal, 
                    durasi, akun_digunakan)
         
-        # Discord
+        # Discord (enhanced)
         akun_str = ", ".join(akun_digunakan) if akun_digunakan else "-"
+        fields = [
+            {"name": "✅ Total Sukses", "value": str(total_sukses), "inline": True},
+            {"name": "❌ Total Gagal", "value": str(total_gagal), "inline": True},
+            {"name": "⏱️ Durasi", "value": durasi, "inline": True},
+            {"name": "👤 Akun Digunakan", "value": akun_str, "inline": False},
+        ]
+        if total_foto:
+            fields.insert(0, {"name": "📸 Total Foto", 
+                             "value": f"{total_sukses + total_gagal}/{total_foto}", "inline": True})
+        if foto_sisa > 0:
+            fields.append({"name": "📸 Foto Belum Upload", 
+                          "value": f"{foto_sisa} foto", "inline": True})
+        if akun_diskip:
+            fields.append({"name": "⚠️ Akun Di-Skip", 
+                          "value": ", ".join(akun_diskip), "inline": False})
+        
         send_discord(
             discord_url,
             title="🎉 Pinterest Bot Selesai",
             message="Semua pin telah selesai diproses.",
             color=DISCORD_COLOR_GREEN,
-            fields=[
-                {"name": "✅ Total Sukses", "value": str(total_sukses), "inline": True},
-                {"name": "❌ Total Gagal", "value": str(total_gagal), "inline": True},
-                {"name": "⏱️ Durasi", "value": durasi, "inline": True},
-                {"name": "👤 Akun Digunakan", "value": akun_str, "inline": False},
-            ],
+            fields=fields,
         )
     
     elif event == "error":
