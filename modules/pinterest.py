@@ -1,13 +1,8 @@
 """
 modules/pinterest.py
 =====================
-Fungsi-fungsi interaksi dengan Pinterest via Selenium WebDriver.
-Menangani login, logout, cek sesi, upload pin, dan retry mechanism.
-
-Optimasi kecepatan:
-- _fast_fill(): inject value via JavaScript (instan, tanpa ngetik per karakter)
-- _find_element_fast(): cari elemen tanpa WebDriverWait (lebih cepat untuk elemen yang sudah ada)
-- upload_pin(): delay minimal, event-driven wait (tunggu elemen muncul, bukan sleep)
+Upload pin ke Pinterest secara INSTAN menggunakan JavaScript injection.
+Tidak ada human_type, tidak ada short_delay yang tidak perlu.
 """
 
 import os
@@ -28,608 +23,362 @@ from selenium.common.exceptions import (
 from modules.browser import human_type, short_delay, random_delay
 from modules.logger import print_success, print_error, print_warning, print_info
 
-
-# URL Pinterest
-PINTEREST_HOME = "https://id.pinterest.com/"
-PINTEREST_LOGIN = "https://id.pinterest.com/login/"
+PINTEREST_HOME       = "https://id.pinterest.com/"
+PINTEREST_LOGIN      = "https://id.pinterest.com/login/"
 PINTEREST_CREATE_PIN = "https://id.pinterest.com/pin-creation-tool/"
-PINTEREST_LOGOUT = "https://id.pinterest.com/logout/"
+PINTEREST_LOGOUT     = "https://id.pinterest.com/logout/"
 
+# ─────────────────────────────────────────────
+#  JS INJECT — isi field instan tanpa ngetik
+# ─────────────────────────────────────────────
+_JS_FILL_INPUT = """
+var el  = arguments[0];
+var val = arguments[1];
+var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value')
+          || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');
+if (setter) { setter.set.call(el, val); }
+else        { el.value = val; }
+el.dispatchEvent(new Event('input',  {bubbles:true}));
+el.dispatchEvent(new Event('change', {bubbles:true}));
+el.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));
+"""
+
+_JS_FILL_DIV = """
+var el  = arguments[0];
+var val = arguments[1];
+el.focus();
+el.innerText = val;
+el.dispatchEvent(new Event('input',  {bubbles:true}));
+el.dispatchEvent(new Event('change', {bubbles:true}));
+el.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));
+"""
+
+
+def _fill(driver, el, text: str) -> None:
+    """Isi elemen secara instan via JavaScript. Fallback ke send_keys."""
+    try:
+        tag = el.tag_name.lower()
+        if tag in ('input', 'textarea'):
+            driver.execute_script(_JS_FILL_INPUT, el, text)
+        else:
+            driver.execute_script(_JS_FILL_DIV, el, text)
+    except Exception:
+        try:
+            el.clear()
+            el.send_keys(text)
+        except Exception:
+            pass
+
+
+def _find(driver, css_list: list, xpath: str = None):
+    """Cari elemen visible dari list CSS selector. Tanpa WebDriverWait."""
+    for css in css_list:
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, css)
+            if el.is_displayed():
+                return el
+        except Exception:
+            continue
+    if xpath:
+        try:
+            el = driver.find_element(By.XPATH, xpath)
+            if el.is_displayed():
+                return el
+        except Exception:
+            pass
+    return None
+
+
+def _wait_for(driver, css_list: list, timeout: int = 25):
+    """Tunggu sampai salah satu elemen dari css_list muncul di DOM."""
+    end = time.time() + timeout
+    while time.time() < end:
+        for css in css_list:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, css)
+                if els and els[0].is_displayed():
+                    return els[0]
+            except Exception:
+                continue
+        time.sleep(0.3)
+    return None
+
+
+# ─────────────────────────────────────────────
+#  LOGIN / LOGOUT / CEK SESI
+# ─────────────────────────────────────────────
 
 def is_logged_in(driver) -> bool:
-    """
-    Cek apakah sesi Pinterest masih aktif (user sudah login).
-    
-    Mengecek keberadaan elemen yang hanya muncul saat sudah login,
-    seperti tombol create atau avatar user.
-    
-    Args:
-        driver: Instance Chrome WebDriver
-    
-    Returns:
-        True jika masih login, False jika belum/expired
-    """
+    """Cek apakah sesi Pinterest masih aktif."""
     try:
         driver.get(PINTEREST_HOME)
-        short_delay(2.0, 4.0)
-        
-        # Cek apakah redirect ke halaman login
-        current_url = driver.current_url
-        if "/login" in current_url:
+        time.sleep(2)
+        if "/login" in driver.current_url:
             return False
-        
-        # Cek elemen yang menandakan sudah login
-        wait = WebDriverWait(driver, 10)
-        
-        # Coba beberapa selector yang menandakan user sudah login
-        login_indicators = [
+        indicators = [
             '[data-test-id="header-avatar"]',
             '[data-test-id="headerUserMenuButton"]',
-            'div[data-test-id="homefeed-feed"]',
             '[data-test-id="create-button"]',
-            'button[aria-label="Account and more options"]',
         ]
-        
-        for selector in login_indicators:
+        for sel in indicators:
             try:
-                element = driver.find_element(By.CSS_SELECTOR, selector)
-                if element:
+                if driver.find_element(By.CSS_SELECTOR, sel):
                     return True
-            except (NoSuchElementException, TimeoutException):
+            except NoSuchElementException:
                 continue
-        
-        # Fallback: cek apakah ada elemen login form → belum login
-        try:
-            login_form = driver.find_element(By.CSS_SELECTOR, 'input[name="id"]')
-            if login_form:
-                return False
-        except NoSuchElementException:
-            pass
-        
-        # Jika tidak redirect ke login dan tidak ada form login,
-        # kemungkinan besar sudah login
-        if "/login" not in current_url and "/reset" not in current_url:
-            return True
-        
-        return False
-        
+        return "/login" not in driver.current_url
     except Exception as e:
-        print_warning(f"Error saat cek status login: {e}")
+        print_warning(f"Error cek login: {e}")
         return False
 
 
 def login(driver, email: str, password: str) -> bool:
-    """
-    Login ke Pinterest menggunakan email dan password.
-    
-    Menggunakan human_type untuk simulasi kecepatan mengetik manusia.
-    Jika CAPTCHA muncul, program akan pause dan minta input manual.
-    
-    Args:
-        driver: Instance Chrome WebDriver
-        email: Email akun Pinterest
-        password: Password akun Pinterest
-    
-    Returns:
-        True jika login berhasil, False jika gagal
-    """
+    """Login ke Pinterest. Gunakan human_type agar tidak terdeteksi bot."""
     try:
         print_info(f"Memulai login untuk {email}...")
-        
-        # Navigasi ke halaman login
         driver.get(PINTEREST_LOGIN)
-        short_delay(3.0, 5.0)
-        
+        time.sleep(3)
         wait = WebDriverWait(driver, 15)
-        
-        # Tunggu halaman login dimuat
+
         try:
-            email_field = wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, 'input[id="email"]'))
-            )
+            email_field = wait.until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, 'input[id="email"], input[name="id"]')))
         except TimeoutException:
-            # Coba selector alternatif
-            try:
-                email_field = wait.until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="id"]'))
-                )
-            except TimeoutException:
-                # Mungkin sudah login
-                if is_logged_in(driver):
-                    print_success("Sudah login (sesi aktif dari Chrome Profile)")
-                    return True
-                print_error("Tidak bisa menemukan form login")
-                return False
-        
-        # Clear field dan ketik email
+            if is_logged_in(driver):
+                print_success("Sudah login (Chrome Profile aktif)")
+                return True
+            print_error("Tidak bisa menemukan form login")
+            return False
+
         email_field.clear()
-        short_delay(0.5, 1.0)
+        time.sleep(0.3)
         human_type(email_field, email)
-        short_delay(1.0, 2.0)
-        
-        # Cari dan isi field password
+        time.sleep(0.5)
+
         try:
-            password_field = driver.find_element(By.CSS_SELECTOR, 'input[id="password"]')
+            pwd = driver.find_element(By.CSS_SELECTOR, 'input[id="password"]')
         except NoSuchElementException:
-            password_field = driver.find_element(By.CSS_SELECTOR, 'input[name="password"]')
-        
-        password_field.clear()
-        short_delay(0.5, 1.0)
-        human_type(password_field, password)
-        short_delay(1.0, 2.0)
-        
-        # Klik tombol login
+            pwd = driver.find_element(By.CSS_SELECTOR, 'input[name="password"]')
+
+        pwd.clear()
+        time.sleep(0.3)
+        human_type(pwd, password)
+        time.sleep(0.5)
+
         try:
-            login_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
-            login_btn.click()
+            driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
         except NoSuchElementException:
-            # Fallback: tekan Enter
-            password_field.send_keys(Keys.RETURN)
-        
-        short_delay(5.0, 8.0)
-        
-        # Cek apakah ada CAPTCHA atau error
-        current_url = driver.current_url
-        page_source = driver.page_source.lower()
-        
-        # Deteksi CAPTCHA
-        if "challenge" in current_url or "captcha" in page_source or "verify" in current_url:
-            print_warning("⚠️ CAPTCHA terdeteksi! Silakan selesaikan CAPTCHA secara manual.")
-            input("Tekan ENTER setelah menyelesaikan CAPTCHA...")
-            short_delay(2.0, 3.0)
-        
-        # Deteksi error login
-        error_selectors = [
-            'div[data-test-id="loginError"]',
-            '.error-text',
-            'div[class*="error"]',
-        ]
-        for selector in error_selectors:
-            try:
-                error_el = driver.find_element(By.CSS_SELECTOR, selector)
-                if error_el and error_el.is_displayed():
-                    print_error(f"Login gagal: {error_el.text}")
-                    return False
-            except NoSuchElementException:
-                continue
-        
-        # Verifikasi login berhasil
-        short_delay(3.0, 5.0)
+            pwd.send_keys(Keys.RETURN)
+
+        time.sleep(5)
+
+        src = driver.page_source.lower()
+        url = driver.current_url
+        if "challenge" in url or "captcha" in src or "verify" in url:
+            print_warning("⚠️ CAPTCHA terdeteksi! Selesaikan manual.")
+            input("Tekan ENTER setelah CAPTCHA selesai...")
+            time.sleep(2)
+
+        time.sleep(3)
         if is_logged_in(driver):
-            print_success(f"Login berhasil untuk {email}")
+            print_success(f"Login berhasil: {email}")
             return True
-        
-        # Cek sekali lagi setelah delay lebih lama
-        short_delay(5.0, 8.0)
+
+        time.sleep(5)
         if "/login" not in driver.current_url:
-            print_success(f"Login berhasil untuk {email}")
+            print_success(f"Login berhasil: {email}")
             return True
-        
-        print_error(f"Login gagal untuk {email}")
+
+        print_error(f"Login gagal: {email}")
         return False
-        
     except Exception as e:
-        print_error(f"Error saat login: {e}")
+        print_error(f"Error login: {e}")
         return False
 
 
 def logout(driver) -> bool:
-    """
-    Logout dari Pinterest.
-    
-    Args:
-        driver: Instance Chrome WebDriver
-    
-    Returns:
-        True jika logout berhasil
-    """
+    """Logout dari Pinterest."""
     try:
         driver.get(PINTEREST_LOGOUT)
-        short_delay(3.0, 5.0)
+        time.sleep(3)
         print_info("Logout berhasil")
         return True
     except Exception as e:
-        print_warning(f"Error saat logout: {e}")
+        print_warning(f"Error logout: {e}")
         return False
 
 
-# ============================================================
-# SPEED-OPTIMIZED HELPERS
-# ============================================================
-
-def _fast_fill(driver, element, text: str) -> None:
-    """
-    Isi field input secara instan via JavaScript.
-    
-    Menggunakan nativeInputValueSetter untuk memicu React/Vue state update.
-    Untuk contenteditable div, gunakan innerText + dispatch event.
-    Fallback ke send_keys jika JS gagal.
-    
-    Args:
-        driver: Instance Chrome WebDriver
-        element: Selenium WebElement yang akan diisi
-        text: Teks yang akan dimasukkan
-    """
-    tag_name = element.tag_name.lower()
-    
-    if tag_name in ("input", "textarea"):
-        # Gunakan nativeInputValueSetter agar React/Vue mendeteksi perubahan
-        js_code = """
-        var el = arguments[0];
-        var val = arguments[1];
-        var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-            window.HTMLInputElement.prototype, 'value') ||
-            Object.getOwnPropertyDescriptor(
-            window.HTMLTextAreaElement.prototype, 'value');
-        if (nativeInputValueSetter) {
-            nativeInputValueSetter.set.call(el, val);
-        } else {
-            el.value = val;
-        }
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        """
-        try:
-            driver.execute_script(js_code, element, text)
-            return
-        except WebDriverException:
-            pass
-    
-    elif tag_name == "div":
-        # Contenteditable div — set innerText lalu dispatch input event
-        js_code = """
-        var el = arguments[0];
-        var val = arguments[1];
-        el.innerText = val;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        """
-        try:
-            driver.execute_script(js_code, element, text)
-            return
-        except WebDriverException:
-            pass
-    
-    # Fallback: traditional clear + send_keys
-    try:
-        element.clear()
-    except Exception:
-        pass
-    element.send_keys(text)
-
-
-def _find_element_fast(driver, selectors: list[str], 
-                        xpath: str | None = None):
-    """
-    Cari elemen dari list selector tanpa WebDriverWait (lebih cepat).
-    
-    Loop setiap selector, cek is_displayed(), return elemen pertama 
-    yang ditemukan dan visible. Tidak menggunakan WebDriverWait 
-    sehingga lebih cepat untuk elemen yang sudah ada di DOM.
-    
-    Args:
-        driver: Instance Chrome WebDriver
-        selectors: List CSS selector untuk dicari
-        xpath: XPath fallback (opsional)
-    
-    Returns:
-        WebElement yang ditemukan dan visible, atau None
-    """
-    for selector in selectors:
-        try:
-            el = driver.find_element(By.CSS_SELECTOR, selector)
-            if el and el.is_displayed():
-                return el
-        except (NoSuchElementException, WebDriverException):
-            continue
-    
-    # Fallback ke XPath jika disediakan
-    if xpath:
-        try:
-            el = driver.find_element(By.XPATH, xpath)
-            if el and el.is_displayed():
-                return el
-        except (NoSuchElementException, WebDriverException):
-            pass
-    
-    return None
-
-
-# ============================================================
-# BOARD SELECTION (OPTIMIZED)
-# ============================================================
+# ─────────────────────────────────────────────
+#  PILIH BOARD
+# ─────────────────────────────────────────────
 
 def _select_board(driver, board_name: str) -> bool:
-    """
-    Pilih board untuk pin yang akan diupload.
-    
-    Delay dioptimasi: menggunakan time.sleep() pendek sebagai pengganti
-    short_delay() yang lebih lambat.
-    
-    Args:
-        driver: Instance Chrome WebDriver
-        board_name: Nama board tujuan
-    
-    Returns:
-        True jika board berhasil dipilih
-    """
+    """Pilih board Pinterest. Delay minimal."""
     try:
         wait = WebDriverWait(driver, 10)
-        
-        # Klik dropdown board
-        board_selectors = [
+
+        board_btn = None
+        for sel in [
             'button[data-test-id="board-dropdown-select-button"]',
             'button[data-test-id="boardDropdownSelectButton"]',
             'div[data-test-id="board-dropdown-select-button"]',
-            'button[aria-label="Board"]',
-            'div[data-test-id="boardDropdown"]',
-        ]
-        
-        board_btn = None
-        for selector in board_selectors:
+        ]:
             try:
-                board_btn = wait.until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                )
-                if board_btn:
-                    board_btn.click()
-                    time.sleep(0.5)
-                    break
+                board_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+                board_btn.click()
+                time.sleep(0.5)
+                break
             except (TimeoutException, NoSuchElementException):
                 continue
-        
+
         if not board_btn:
-            # Coba cari board dropdown dengan teks
             try:
-                board_elements = driver.find_elements(By.XPATH, 
-                    '//button[contains(text(), "Choose a board")] | //button[contains(text(), "board")] | //div[@role="button"][contains(text(), "board")]')
-                if board_elements:
-                    board_elements[0].click()
+                els = driver.find_elements(By.XPATH,
+                    '//button[contains(text(),"Choose a board")]'
+                    '|//button[contains(text(),"Pilih papan")]')
+                if els:
+                    els[0].click()
                     time.sleep(0.5)
             except Exception:
                 pass
-        
-        # Cari field pencarian board
-        search_selectors = [
+
+        # Cari search field board
+        sf = _find(driver, [
             'input[data-test-id="board-search-input"]',
             'input[placeholder*="Search"]',
-            'input[placeholder*="search"]',
             'input[placeholder*="Cari"]',
-            'input[aria-label*="Search"]',
             'input[id="pickerSearchField"]',
-        ]
-        
-        search_field = None
-        for selector in search_selectors:
-            try:
-                search_field = driver.find_element(By.CSS_SELECTOR, selector)
-                if search_field:
-                    break
-            except NoSuchElementException:
-                continue
-        
-        if search_field:
-            search_field.clear()
-            # Gunakan send_keys langsung (bukan human_type) untuk kecepatan
-            search_field.send_keys(board_name)
+        ])
+        if sf:
+            sf.clear()
+            sf.send_keys(board_name)
             time.sleep(0.8)
-        
-        # Klik board yang sesuai dari hasil pencarian
+
+        # Klik nama board
         try:
-            # Cari board dengan nama yang sesuai
-            board_options = driver.find_elements(By.XPATH,
-                f'//div[contains(text(), "{board_name}")] | //span[contains(text(), "{board_name}")]')
-            
-            if board_options:
-                for option in board_options:
-                    try:
-                        if option.is_displayed():
-                            option.click()
-                            time.sleep(0.4)
-                            return True
-                    except (ElementNotInteractableException, WebDriverException):
-                        continue
-            
-            # Fallback: klik opsi pertama yang muncul
-            time.sleep(0.3)
-            first_option_selectors = [
-                'div[data-test-id="boardWithoutSection"]',
-                'div[role="option"]',
-                'ul[role="listbox"] li',
-            ]
-            for selector in first_option_selectors:
-                try:
-                    options = driver.find_elements(By.CSS_SELECTOR, selector)
-                    if options:
-                        options[0].click()
-                        time.sleep(0.4)
-                        return True
-                except (NoSuchElementException, ElementNotInteractableException):
-                    continue
-            
-        except Exception as e:
-            print_warning(f"Error memilih board: {e}")
-        
-        return True  # Proceed anyway, board mungkin sudah terpilih
-        
+            opts = driver.find_elements(By.XPATH,
+                f'//div[text()="{board_name}"]|//span[text()="{board_name}"]')
+            for opt in opts:
+                if opt.is_displayed():
+                    opt.click()
+                    time.sleep(0.3)
+                    return True
+        except Exception:
+            pass
+
+        # Fallback klik opsi pertama
+        time.sleep(0.3)
+        for sel in [
+            'div[data-test-id="boardWithoutSection"]',
+            'div[role="option"]',
+            'ul[role="listbox"] li',
+        ]:
+            try:
+                opts = driver.find_elements(By.CSS_SELECTOR, sel)
+                if opts:
+                    opts[0].click()
+                    time.sleep(0.3)
+                    return True
+            except Exception:
+                continue
+
+        return True
     except Exception as e:
-        print_warning(f"Error pada pemilihan board: {e}")
+        print_warning(f"Error pilih board: {e}")
         return False
 
 
-# ============================================================
-# UPLOAD PIN (SPEED-OPTIMIZED)
-# ============================================================
+# ─────────────────────────────────────────────
+#  UPLOAD PIN — INSTAN
+# ─────────────────────────────────────────────
 
-def upload_pin(driver, image_path: str, title: str, 
+def upload_pin(driver, image_path: str, title: str,
                description: str, board_name: str,
                link_url: str = "") -> bool:
     """
-    Upload satu pin ke Pinterest dengan kecepatan optimal.
-    
-    Menggunakan _fast_fill() (JavaScript inject) untuk mengisi field
-    secara instan, dan event-driven wait (tunggu elemen muncul)
-    sebagai pengganti sleep statis.
-    
-    Estimasi waktu: ~15-20 detik per pin (dari ~15 menit sebelumnya).
-    
-    Langkah:
-    1. Buka halaman pin creation tool
-    2. Upload gambar
-    3. Isi judul (_fast_fill)
-    4. Isi deskripsi (_fast_fill)
-    5. Isi destination link (_fast_fill, jika ada)
-    6. Pilih board
-    7. Publish pin
-    
-    Args:
-        driver: Instance Chrome WebDriver
-        image_path: Path lengkap ke file gambar yang akan diupload
-        title: Judul pin
-        description: Deskripsi pin (termasuk hashtag)
-        board_name: Nama board tujuan
-        link_url: URL destination link (opsional, kosong = tidak diisi)
-    
-    Returns:
-        True jika upload berhasil, False jika gagal
+    Upload pin ke Pinterest secara instan.
+    Semua field diisi via JavaScript injection — tidak ada ngetik per karakter.
+    Estimasi: 15-25 detik per pin termasuk upload gambar.
     """
     try:
-        # === Step 1: Buka halaman create pin ===
+        # ── 1. Buka halaman create pin ──────────────────────────────
         driver.get(PINTEREST_CREATE_PIN)
-        
-        # Tunggu halaman siap — indikator: field judul muncul
-        wait = WebDriverWait(driver, 20)
-        try:
-            wait.until(lambda d: _find_element_fast(d, [
-                'input[data-test-id="pin-draft-title"]',
-                'input[placeholder="Tambahkan judul"]',
-                'input[placeholder="Add a title"]',
-                'input[type="file"]',
-            ]))
-        except TimeoutException:
-            time.sleep(3)
-        
-        # === Step 2: Upload gambar ===
-        file_input = None
-        file_input_selectors = [
+
+        # Tunggu input[type=file] muncul (max 15 detik)
+        file_input = _wait_for(driver, [
             'input[type="file"]',
-            'input[data-test-id="image-upload-input"]',
             'input[accept*="image"]',
-        ]
-        
-        for selector in file_input_selectors:
-            try:
-                inputs = driver.find_elements(By.CSS_SELECTOR, selector)
-                if inputs:
-                    file_input = inputs[0]
-                    break
-            except NoSuchElementException:
-                continue
-        
+        ], timeout=15)
+
         if not file_input:
-            print_error("Tidak bisa menemukan input upload file")
+            print_error("Halaman create pin tidak termuat")
             return False
-        
-        # Kirim path gambar ke input file
-        absolute_path = os.path.abspath(image_path)
-        file_input.send_keys(absolute_path)
-        
-        # Tunggu gambar terupload — indikator: field judul bisa diisi
-        wait30 = WebDriverWait(driver, 30)
-        try:
-            wait30.until(lambda d: _find_element_fast(d, [
-                'input[data-test-id="pin-draft-title"]',
-                'input[placeholder="Tambahkan judul"]',
-                'input[placeholder="Add a title"]',
-            ]))
-        except TimeoutException:
-            # Fallback sleep jika field tidak muncul
-            time.sleep(4)
-        
-        # === Step 3: Isi judul ===
-        title_selectors = [
+
+        # ── 2. Upload gambar ────────────────────────────────────────
+        file_input.send_keys(os.path.abspath(image_path))
+        print_info(f"   Mengirim file: {os.path.basename(image_path)}")
+
+        # Tunggu field judul muncul = tanda gambar sudah diproses
+        title_appeared = _wait_for(driver, [
             'input[data-test-id="pin-draft-title"]',
             'input[placeholder="Tambahkan judul"]',
             'input[placeholder="Add a title"]',
             'input[placeholder*="judul" i]',
             'input[placeholder*="title" i]',
-        ]
-        title_xpath = (
-            '//input[@placeholder="Tambahkan judul"] | '
-            '//input[@placeholder="Add a title"] | '
-            '//input[contains(@placeholder, "judul")] | '
-            '//input[contains(@placeholder, "title")]'
-        )
-        
-        title_field = _find_element_fast(driver, title_selectors, title_xpath)
-        if title_field:
-            title_field.click()
-            time.sleep(0.2)
-            _fast_fill(driver, title_field, title)
-            time.sleep(0.3)
-        
-        # === Step 4: Isi deskripsi ===
-        desc_selectors = [
+        ], timeout=30)
+
+        if not title_appeared:
+            print_warning("Field judul tidak muncul, lanjutkan...")
+            time.sleep(3)
+
+        # ── 3. Isi Judul — instan ───────────────────────────────────
+        tf = _find(driver, [
+            'input[data-test-id="pin-draft-title"]',
+            'input[placeholder="Tambahkan judul"]',
+            'input[placeholder="Add a title"]',
+            'input[placeholder*="judul" i]',
+            'input[placeholder*="title" i]',
+        ])
+        if tf and title:
+            tf.click()
+            _fill(driver, tf, title)
+
+        # ── 4. Isi Deskripsi — instan ───────────────────────────────
+        df = _find(driver, [
             'textarea[data-test-id="pin-draft-description"]',
             'textarea[placeholder="Ceritakan lebih banyak"]',
             'textarea[placeholder*="Ceritakan" i]',
             'textarea[placeholder*="Tell" i]',
             'div[data-test-id="pin-draft-description"] [contenteditable="true"]',
-            'div[data-test-id="pin-draft-description"] .notranslate',
-            'div[role="textbox"][data-test-id="pin-draft-description"]',
-            'div[class*="Description"] [contenteditable="true"]',
-            'div.public-DraftEditor-content',
-        ]
-        desc_xpath = (
-            '//textarea[@placeholder="Ceritakan lebih banyak"] | '
-            '//textarea[contains(@placeholder, "Ceritakan")] | '
-            '//textarea[contains(@placeholder, "Tell")] | '
-            '//div[@data-test-id="pin-draft-description"]//div[@contenteditable="true"]'
-        )
-        
-        desc_field = _find_element_fast(driver, desc_selectors, desc_xpath)
-        if desc_field:
-            desc_field.click()
-            time.sleep(0.2)
-            _fast_fill(driver, desc_field, description)
-            time.sleep(0.3)
-        
-        # === Step 5: Isi tautan/link (jika ada) ===
+        ], xpath='//textarea[contains(@placeholder,"Ceritakan") or contains(@placeholder,"Tell")]')
+        if df and description:
+            df.click()
+            _fill(driver, df, description)
+
+        # ── 5. Isi Link/Tautan — instan ─────────────────────────────
         if link_url:
-            link_selectors = [
+            lf = _find(driver, [
                 'input[data-test-id="pin-draft-link"]',
                 'input[placeholder="Tambahkan tautan"]',
                 'input[placeholder="Add a destination link"]',
                 'input[placeholder*="tautan" i]',
                 'input[placeholder*="destination" i]',
                 'input[placeholder*="link" i]',
-                'input[placeholder*="url" i]',
-                'input[id="pin-draft-link"]',
-                'input[name="link"]',
-            ]
-            link_xpath = (
-                '//input[@placeholder="Tambahkan tautan"] | '
-                '//input[contains(@placeholder, "tautan")] | '
-                '//input[contains(@placeholder, "Add a destination link")] | '
-                '//input[contains(@placeholder, "destination")] | '
-                '//input[contains(@placeholder, "link")]'
-            )
-            
-            link_field = _find_element_fast(driver, link_selectors, link_xpath)
-            if link_field:
-                link_field.click()
-                time.sleep(0.2)
-                _fast_fill(driver, link_field, link_url)
-                time.sleep(0.3)
+            ])
+            if lf:
+                lf.click()
+                _fill(driver, lf, link_url)
             else:
-                print_warning("Tidak bisa menemukan field Destination Link")
-        
-        # === Step 6: Pilih board ===
+                print_warning("Field tautan tidak ditemukan")
+
+        # ── 6. Pilih Board ──────────────────────────────────────────
         _select_board(driver, board_name)
-        time.sleep(0.3)
-        
-        # === Step 7: Klik tombol Publish/Save ===
-        publish_selectors = [
+
+        # ── 7. Klik Publish ─────────────────────────────────────────
+        wait10 = WebDriverWait(driver, 10)
+        published = False
+
+        for sel in [
             'button[data-test-id="board-dropdown-save-button"]',
             'button[data-test-id="create-pin-save-button"]',
             'div[data-test-id="pin-draft-save-button"] button',
@@ -637,73 +386,38 @@ def upload_pin(driver, image_path: str, title: str,
             'button[aria-label="Simpan"]',
             'button[aria-label="Publish"]',
             'button[aria-label="Save"]',
-        ]
-        
-        wait10 = WebDriverWait(driver, 10)
-        published = False
-        
-        for selector in publish_selectors:
+        ]:
             try:
-                publish_btn = wait10.until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                )
-                if publish_btn and publish_btn.is_displayed():
-                    publish_btn.click()
+                btn = wait10.until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+                if btn.is_displayed():
+                    btn.click()
                     published = True
                     break
             except (TimeoutException, NoSuchElementException,
                     ElementNotInteractableException):
                 continue
-        
+
         if not published:
-            # Fallback: cari tombol berdasarkan teks
-            try:
-                buttons = driver.find_elements(By.TAG_NAME, 'button')
-                for btn in buttons:
-                    btn_text = btn.text.strip().lower()
-                    if btn_text in ('publish', 'save', 'simpan', 'terbitkan'):
-                        if btn.is_displayed():
+            for btn in driver.find_elements(By.TAG_NAME, 'button'):
+                try:
+                    if btn.text.strip().lower() in ('terbitkan','simpan','publish','save'):
+                        if btn.is_displayed() and btn.is_enabled():
                             btn.click()
                             published = True
                             break
-            except Exception:
-                pass
-        
-        if not published:
-            print_error("Tidak bisa menemukan tombol Publish/Save")
-            return False
-        
-        # === Step 8: Tunggu konfirmasi ===
-        time.sleep(3)
-        
-        # Verifikasi sukses — cek apakah ada toast/notifikasi
-        try:
-            success_indicators = [
-                'div[data-test-id="toast"]',
-                'div[class*="success"]',
-                'span[class*="success"]',
-            ]
-            for selector in success_indicators:
-                try:
-                    success_el = driver.find_element(By.CSS_SELECTOR, selector)
-                    if success_el:
-                        return True
-                except NoSuchElementException:
+                except Exception:
                     continue
-        except Exception:
-            pass
-        
-        # Jika tidak ada error yang jelas, anggap berhasil
-        # Pre-navigate ke halaman create pin untuk upload berikutnya
-        try:
-            driver.get(PINTEREST_CREATE_PIN)
-            time.sleep(1)
-        except Exception:
-            pass
+
+        if not published:
+            print_error("Tombol Publish/Terbitkan tidak ditemukan")
+            return False
+
+        # ── 8. Tunggu selesai lalu lanjut ───────────────────────────
+        time.sleep(3)
         return True
-        
+
     except Exception as e:
-        print_error(f"Error saat upload pin: {e}")
+        print_error(f"Error upload pin: {e}")
         return False
 
 
@@ -711,46 +425,20 @@ def upload_with_retry(driver, image_path: str, title: str,
                       description: str, board_name: str,
                       link_url: str = "",
                       max_retries: int = 3) -> bool:
-    """
-    Upload pin dengan mekanisme retry.
-    
-    Jika upload gagal, coba ulang hingga max_retries kali.
-    Setiap retry memiliki delay yang semakin lama (backoff).
-    
-    Args:
-        driver: Instance Chrome WebDriver
-        image_path: Path lengkap ke file gambar
-        title: Judul pin
-        description: Deskripsi pin
-        board_name: Nama board tujuan
-        link_url: URL destination link (opsional)
-        max_retries: Jumlah maksimum percobaan ulang
-    
-    Returns:
-        True jika upload berhasil (setelah retry), False jika tetap gagal
-    """
+    """Upload pin dengan retry. Backoff delay tiap percobaan gagal."""
     for attempt in range(1, max_retries + 1):
         try:
             print_info(f"Upload attempt {attempt}/{max_retries}: {os.path.basename(image_path)}")
-            
-            success = upload_pin(driver, image_path, title, description, 
-                               board_name, link_url)
-            
-            if success:
+            if upload_pin(driver, image_path, title, description, board_name, link_url):
                 return True
-            
             if attempt < max_retries:
-                # Backoff delay: semakin lama dengan setiap retry
-                backoff = attempt * random.uniform(5.0, 10.0)
-                print_warning(f"Upload gagal, mencoba ulang dalam {backoff:.0f} detik...")
+                backoff = attempt * random.uniform(4.0, 7.0)
+                print_warning(f"Gagal, retry dalam {backoff:.0f} detik...")
                 time.sleep(backoff)
-                
         except Exception as e:
-            print_error(f"Error pada attempt {attempt}: {e}")
+            print_error(f"Error attempt {attempt}: {e}")
             if attempt < max_retries:
-                backoff = attempt * random.uniform(5.0, 10.0)
-                print_warning(f"Mencoba ulang dalam {backoff:.0f} detik...")
-                time.sleep(backoff)
-    
-    print_error(f"Upload gagal setelah {max_retries} percobaan: {os.path.basename(image_path)}")
+                time.sleep(attempt * 5)
+
+    print_error(f"Upload gagal setelah {max_retries}x: {os.path.basename(image_path)}")
     return False
