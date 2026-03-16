@@ -241,11 +241,22 @@ def login(driver, email: str, password: str) -> bool:
     try:
         print_info(f"Memulai login untuk {email}...")
         driver.get(PINTEREST_LOGIN)
-        time.sleep(2)
+        time.sleep(3)
+
+        # Tutup popup/overlay yang mungkin muncul
+        try:
+            driver.execute_script("""
+                document.querySelectorAll('[aria-label="close"], [data-test-id="dismiss-button"], .modal-close')
+                    .forEach(el => el.click());
+            """)
+            time.sleep(0.5)
+        except Exception:
+            pass
+
         wait = WebDriverWait(driver, 15)
 
         try:
-            email_field = wait.until(EC.presence_of_element_located(
+            email_field = wait.until(EC.element_to_be_clickable(
                 (By.CSS_SELECTOR, 'input[id="email"], input[name="id"]')))
         except TimeoutException:
             if is_logged_in(driver):
@@ -254,24 +265,45 @@ def login(driver, email: str, password: str) -> bool:
             print_error("Tidak bisa menemukan form login")
             return False
 
-        email_field.clear()
-        time.sleep(0.1)
-        human_type(email_field, email)
+        try:
+            email_field.click()
+            time.sleep(0.1)
+            email_field.clear()
+            email_field.send_keys(email)
+        except ElementNotInteractableException:
+            # Scroll ke field dan coba lagi
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'})", email_field)
+            time.sleep(0.5)
+            email_field.click()
+            email_field.clear()
+            email_field.send_keys(email)
+
         time.sleep(0.3)
 
         try:
-            pwd = driver.find_element(By.CSS_SELECTOR, 'input[id="password"]')
-        except NoSuchElementException:
-            pwd = driver.find_element(By.CSS_SELECTOR, 'input[name="password"]')
+            pwd = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, 'input[id="password"], input[name="password"]')))
+        except TimeoutException:
+            print_error("Field password tidak ditemukan")
+            return False
 
-        pwd.clear()
-        time.sleep(0.1)
-        human_type(pwd, password)
+        try:
+            pwd.click()
+            time.sleep(0.1)
+            pwd.clear()
+            pwd.send_keys(password)
+        except ElementNotInteractableException:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'})", pwd)
+            time.sleep(0.5)
+            pwd.click()
+            pwd.clear()
+            pwd.send_keys(password)
+
         time.sleep(0.3)
 
         try:
             driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
-        except NoSuchElementException:
+        except (NoSuchElementException, ElementNotInteractableException):
             pwd.send_keys(Keys.RETURN)
 
         time.sleep(3)
@@ -279,9 +311,8 @@ def login(driver, email: str, password: str) -> bool:
         src = driver.page_source.lower()
         url = driver.current_url
         if "challenge" in url or "captcha" in src or "verify" in url:
-            print_warning("\u26a0\ufe0f CAPTCHA terdeteksi! Selesaikan manual.")
-            input("Tekan ENTER setelah CAPTCHA selesai...")
-            time.sleep(1)
+            print_warning("\u26a0\ufe0f CAPTCHA/Challenge terdeteksi, menunggu...")
+            time.sleep(3)
 
         time.sleep(2)
         if "/login" not in driver.current_url:
@@ -317,22 +348,28 @@ def logout(driver) -> bool:
 
 def _select_board(driver, board_name: str) -> bool:
     try:
-        board_btn = _wait_for_visible(driver, [
+        board_btn = _find_visible(driver, [
             'button[data-test-id="board-dropdown-select-button"]',
             'button[data-test-id="boardDropdownSelectButton"]',
             'div[data-test-id="board-dropdown-select-button"]',
-        ], timeout=3)
+        ])
+        if not board_btn:
+            board_btn = _wait_for_visible(driver, [
+                'button[data-test-id="board-dropdown-select-button"]',
+                'button[data-test-id="boardDropdownSelectButton"]',
+                'div[data-test-id="board-dropdown-select-button"]',
+            ], timeout=2)
 
         if board_btn:
             driver.execute_script(_JS_SCROLL_CLICK, board_btn)
-            time.sleep(0.1)
         else:
             els = driver.find_elements(By.XPATH,
                 '//button[contains(text(),"Choose a board")]'
                 '|//button[contains(text(),"Pilih papan")]')
             if els:
                 driver.execute_script(_JS_SCROLL_CLICK, els[0])
-                time.sleep(0.1)
+
+        time.sleep(0.2)
 
         # Cari dan isi search field board
         sf = _find_visible(driver, [
@@ -344,7 +381,7 @@ def _select_board(driver, board_name: str) -> bool:
         if sf:
             sf.clear()
             sf.send_keys(board_name)
-            time.sleep(0.2)
+            time.sleep(0.3)
 
         # Klik nama board yang tepat
         opts = driver.find_elements(By.XPATH,
@@ -353,7 +390,6 @@ def _select_board(driver, board_name: str) -> bool:
             try:
                 if opt.is_displayed():
                     driver.execute_script(_JS_SCROLL_CLICK, opt)
-                    time.sleep(0.1)
                     return True
             except Exception:
                 continue
@@ -368,7 +404,6 @@ def _select_board(driver, board_name: str) -> bool:
             if opts:
                 try:
                     driver.execute_script(_JS_SCROLL_CLICK, opts[0])
-                    time.sleep(0.1)
                     return True
                 except Exception:
                     continue
@@ -419,96 +454,78 @@ def upload_pin(driver, image_path: str, title: str,
         file_input.send_keys(os.path.abspath(image_path))
         print_info(f"   Mengirim file: {os.path.basename(image_path)}")
         
-        time.sleep(1) # Tunggu sejenak agar React selesai render komponen form setelah gambar dimuat
+        time.sleep(0.5) # Tunggu minimal agar React mulai render form
 
-        # ── 3. Isi Judul (Pure Native Selenium) ─────────────────────
+        # Helper: cari elemen cepat (instant dulu, fallback polling singkat)
+        def _fast_find(css_list, timeout=2):
+            el = _find_visible(driver, css_list)
+            if el:
+                return el
+            return _wait_for_visible(driver, css_list, timeout=timeout)
+
+        # ── 3. Isi Judul ─────────────────────────────────────────────
         if title:
-            for attempt in range(3):
-                try:
-                    title_el = _wait_for_visible(driver, [
-                        'input[data-test-id="pin-draft-title"]',
-                        'input[id="storyboard-selector-title"]',
-                        'input[placeholder*="judul" i]',
-                        'input[placeholder*="title" i]'
-                    ], timeout=5)
-                    if title_el:
-                        title_el.click()
-                        time.sleep(0.1)
-                        title_el.clear()
-                        title_el.send_keys(title)
-                        print_info("   ✅ Judul terisi")
-                        break
-                except Exception:
-                    time.sleep(0.3)
+            _title_css = [
+                'input[data-test-id="pin-draft-title"]',
+                'input[id="storyboard-selector-title"]',
+                'input[placeholder*="judul" i]',
+                'input[placeholder*="title" i]'
+            ]
+            title_el = _fast_find(_title_css)
+            if title_el:
+                title_el.click()
+                title_el.clear()
+                title_el.send_keys(title)
+                print_info("   ✅ Judul terisi")
 
-        # ── 4. Isi Deskripsi (Pure Native Selenium) ──────────────────
+        # ── 4. Isi Deskripsi ──────────────────────────────────────────
         if description:
-            for attempt in range(3):
-                try:
-                    desc_el = _wait_for_visible(driver, [
-                        'div[data-test-id="pin-draft-description"] div[role="textbox"]',
-                        'div[data-test-id="pin-draft-description"] [contenteditable="true"]',
-                        'div[data-test-id="storyboard-selector-description"] div[contenteditable="true"]',
-                        'div[role="textbox"][contenteditable="true"]',
-                        'div[contenteditable="true"]'
-                    ], timeout=5)
-                    if desc_el:
-                        desc_el.click()
-                        time.sleep(0.1)
-                        # Select all existing text and replace
-                        desc_el.send_keys(Keys.CONTROL, "a")
-                        time.sleep(0.05)
-                        desc_el.send_keys(description)
-                        print_info("   ✅ Deskripsi terisi")
-                        break
-                except Exception:
-                    time.sleep(0.3)
+            _desc_css = [
+                'div[data-test-id="pin-draft-description"] div[role="textbox"]',
+                'div[data-test-id="pin-draft-description"] [contenteditable="true"]',
+                'div[data-test-id="storyboard-selector-description"] div[contenteditable="true"]',
+                'div[role="textbox"][contenteditable="true"]',
+                'div[contenteditable="true"]'
+            ]
+            desc_el = _fast_find(_desc_css)
+            if desc_el:
+                desc_el.click()
+                desc_el.send_keys(Keys.CONTROL, "a")
+                desc_el.send_keys(description)
+                print_info("   ✅ Deskripsi terisi")
 
-        # ── 5. Isi Tautan/Link (Pure Native Selenium) ────────────────
+        # ── 5. Isi Tautan ─────────────────────────────────────────────
         if link_url:
-            for attempt in range(3):
-                try:
-                    lf = _wait_for_visible(driver, [
-                        'input[id="storyboard-selector-link"]',
-                        'input[data-test-id="pin-draft-link"]',
-                        'input[placeholder*="tautan" i]',
-                        'input[placeholder*="link" i]',
-                        'textarea[placeholder*="tautan" i]',
-                        'textarea[placeholder*="link" i]'
-                    ], timeout=5)
-                    if lf:
-                        lf.click()
-                        time.sleep(0.1)
-                        lf.clear()
-                        lf.send_keys(link_url)
-                        # Tekan TAB untuk memaksa blur event → React register value
-                        lf.send_keys(Keys.TAB)
-                        print_info("   ✅ Tautan terisi")
-                        break
-                except Exception:
-                    time.sleep(0.3)
+            _link_css = [
+                'input[id="storyboard-selector-link"]',
+                'input[data-test-id="pin-draft-link"]',
+                'input[placeholder*="tautan" i]',
+                'input[placeholder*="link" i]',
+                'textarea[placeholder*="tautan" i]',
+                'textarea[placeholder*="link" i]'
+            ]
+            lf = _fast_find(_link_css)
+            if lf:
+                lf.click()
+                lf.clear()
+                lf.send_keys(link_url)
+                lf.send_keys(Keys.TAB)
+                print_info("   ✅ Tautan terisi")
 
         # ── 6. Pilih Board ──────────────────────────────────────────
         _select_board(driver, board_name)
 
         # ── 7. Klik Tombol Terbitkan ─────────────────────────────────
-        print_info("   Mencari tombol Terbitkan...")
-        time.sleep(1)
-
         published = False
-        timeout_end = time.time() + 30
+        timeout_end = time.time() + 10
 
         while time.time() < timeout_end:
             try:
-                # Cari SEMUA button di halaman
                 all_btns = driver.find_elements(By.TAG_NAME, 'button')
                 for btn in all_btns:
                     try:
                         txt = btn.text.strip().lower()
                         if txt in ('terbitkan', 'publish', 'simpan', 'save'):
-                            # Klik langsung pakai Selenium native click
-                            driver.execute_script(
-                                "arguments[0].scrollIntoView({block:'center'})", btn)
                             btn.click()
                             print_info("   ✅ Tombol Terbitkan diklik!")
                             published = True
@@ -521,7 +538,7 @@ def upload_pin(driver, image_path: str, title: str,
             if published:
                 break
 
-            time.sleep(1)
+            time.sleep(0.3)
 
         if not published:
             print_error("Tombol Publish tidak ditemukan / gagal diklik / timeout")

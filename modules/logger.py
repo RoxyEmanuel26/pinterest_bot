@@ -13,6 +13,7 @@ Komponen:
 import os
 import csv
 import json
+import time
 import tempfile
 from datetime import datetime, timedelta
 
@@ -585,21 +586,30 @@ def display_all_accounts_down(akun_status: dict[str, str],
     console.print()
 
 
+_start_time = time.time()
+
+def _elapsed() -> str:
+    """Return elapsed time since program start as [HH:MM:SS]."""
+    secs = int(time.time() - _start_time)
+    h, m, s = secs // 3600, (secs % 3600) // 60, secs % 60
+    return f"[{h:02d}:{m:02d}:{s:02d}]"
+
+
 def print_success(message: str):
     """Print pesan sukses berwarna hijau."""
-    console.print(f"  [bold green]✅ {message}[/bold green]")
+    console.print(f"  [dim]{_elapsed()}[/dim] [bold green]✅ {message}[/bold green]")
 
 
 def print_error(message: str):
     """Print pesan error berwarna merah."""
-    console.print(f"  [bold red]❌ {message}[/bold red]")
+    console.print(f"  [dim]{_elapsed()}[/dim] [bold red]❌ {message}[/bold red]")
 
 
 def print_warning(message: str):
     """Print pesan warning berwarna kuning."""
-    console.print(f"  [bold yellow]⚠️  {message}[/bold yellow]")
+    console.print(f"  [dim]{_elapsed()}[/dim] [bold yellow]⚠️  {message}[/bold yellow]")
 
 
 def print_info(message: str):
     """Print pesan info berwarna biru."""
-    console.print(f"  [bold blue]ℹ️  {message}[/bold blue]")
+    console.print(f"  [dim]{_elapsed()}[/dim] [bold blue]ℹ️  {message}[/bold blue]")

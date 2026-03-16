@@ -133,8 +133,8 @@ def load_config(config_path: str) -> dict:
 
     # Default global
     config.setdefault("max_upload_per_akun", 50)
-    config.setdefault("delay_min", 8)
-    config.setdefault("delay_max", 20)
+    config.setdefault("delay_min", 1)
+    config.setdefault("delay_max", 3)
     config.setdefault("headless_mode", False)
     config.setdefault("max_hashtag", 10)
     config.setdefault("deskripsi_mode", "auto")
@@ -284,7 +284,11 @@ def run_bot():
                 _bot_state["putaran_ke"]   = putaran_ke
                 for email, status in prev_state.get("akun_status", {}).items():
                     if email in akun_status:
-                        akun_status[email] = status
+                        # Reset limit_reached → active (sesi baru, counter baru)
+                        if status == "limit_reached":
+                            akun_status[email] = "active"
+                        else:
+                            akun_status[email] = status
                 print_success(f"Melanjutkan dari foto ke-{resume_foto_index + 1}")
             else:
                 session.delete()
@@ -358,6 +362,7 @@ def run_bot():
     driver              = None
     akun_digunakan      = set()
     akun_diskip         = []
+    session_upload_count = {acc["email"]: 0 for acc in accounts}
 
     active_idx = find_next_active_account(accounts, akun_status, current_account_idx)
     if active_idx == -1:
@@ -390,17 +395,44 @@ def run_bot():
 
                 # ----- 7a: Cek semua akun non-active -----
                 if all_accounts_inactive(akun_status):
-                    sisa = len(pending_photos) - i
-                    display_all_accounts_down(akun_status, sisa)
-                    send_all_notifications(config, "error",
-                        error_msg="Semua akun tidak dapat digunakan, program berhenti",
-                        akun="semua akun non-aktif")
-                    break
+                    # Cek apakah ada akun yang hanya limit_reached (bukan banned/error)
+                    limit_only = [e for e, s in akun_status.items() if s == "limit_reached"]
+                    if limit_only:
+                        # Mulai putaran baru!
+                        putaran_ke += 1
+                        _bot_state["putaran_ke"] = putaran_ke
+                        print_info(f"🔄 Semua akun selesai! Memulai putaran ke-{putaran_ke}...")
+                        for email in limit_only:
+                            akun_status[email] = "active"
+                            session_upload_count[email] = 0
+                        current_account_idx = find_next_active_account(accounts, akun_status, 0)
+                        if current_account_idx == -1:
+                            break
+                        # Logout akun lama agar bisa login ulang dari akun pertama
+                        if driver:
+                            try:
+                                logout(driver)
+                            except Exception:
+                                pass
+                            time.sleep(1)
+                            login_success = login(driver, accounts[current_account_idx]["email"],
+                                                  accounts[current_account_idx]["password"])
+                            if not login_success:
+                                time.sleep(3)
+                                login_success = login(driver, accounts[current_account_idx]["email"],
+                                                      accounts[current_account_idx]["password"])
+                    else:
+                        sisa = len(pending_photos) - i
+                        display_all_accounts_down(akun_status, sisa)
+                        send_all_notifications(config, "error",
+                            error_msg="Semua akun tidak dapat digunakan, program berhenti",
+                            akun="semua akun non-aktif")
+                        break
 
                 # ----- 7b: Cek batas upload akun aktif -----
                 current_account   = accounts[current_account_idx]
                 akun_email        = current_account["email"]
-                akun_upload_count = logger.get_account_upload_count(akun_email)
+                akun_upload_count = session_upload_count.get(akun_email, 0)
 
                 if akun_status.get(akun_email) != "active":
                     next_idx = find_next_active_account(accounts, akun_status, 0)
@@ -410,12 +442,10 @@ def run_bot():
                     current_account_idx = next_idx
                     current_account     = accounts[current_account_idx]
                     akun_email          = current_account["email"]
-                    akun_upload_count   = logger.get_account_upload_count(akun_email)
+                    akun_upload_count   = session_upload_count.get(akun_email, 0)
 
                 if akun_upload_count >= max_upload:
-                    if driver:
-                        close_driver(driver)
-                        driver = None
+                    prev_profile = current_account.get("chrome_profile_path", "")
                     next_idx = skip_account(
                         akun_email, "limit_reached", akun_status,
                         accounts, config, foto_gagal=filename
@@ -426,6 +456,41 @@ def run_bot():
                     current_account_idx = next_idx
                     current_account     = accounts[current_account_idx]
                     akun_email          = current_account["email"]
+                    new_profile = current_account.get("chrome_profile_path", "")
+
+                    if driver and prev_profile == new_profile:
+                        # Profile SAMA → logout lalu login akun baru tanpa tutup Chrome
+                        print_info(f"Logout & login ke akun baru: {akun_email}")
+                        try:
+                            logout(driver)
+                        except Exception:
+                            pass
+                        time.sleep(1)
+                        login_success = login(driver, current_account["email"],
+                                             current_account["password"])
+                        if not login_success:
+                            print_warning("Login gagal, mencoba ulang...")
+                            time.sleep(3)
+                            login_success = login(driver, current_account["email"],
+                                                  current_account["password"])
+                        if not login_success:
+                            print_error(f"Login gagal untuk {akun_email}, skip akun")
+                            write_error_log(ERROR_LOG_PATH, akun_email, filename,
+                                            "Login gagal 2x")
+                            next_idx = skip_account(
+                                akun_email, "banned", akun_status,
+                                accounts, config, foto_gagal=filename
+                            )
+                            if next_idx == -1:
+                                display_all_accounts_down(akun_status, len(pending_photos) - i)
+                                break
+                            current_account_idx = next_idx
+                            continue
+                    elif driver:
+                        # Profile BEDA → tutup Chrome lama, buka baru
+                        close_driver(driver)
+                        driver = None
+                        _bot_state["driver"] = None
 
                 akun_digunakan.add(akun_email)
                 _bot_state["akun_index"] = current_account_idx
@@ -449,8 +514,32 @@ def run_bot():
                             akun=akun_email)
                         break
 
-                # ----- 7c: Cek sesi login -----
-                if not is_logged_in(driver):
+                    # Login setelah driver baru dibuka
+                    if not is_logged_in(driver):
+                        print_info(f"Login ke akun: {akun_email}")
+                        login_success = login(driver, current_account["email"],
+                                             current_account["password"])
+                        if not login_success:
+                            time.sleep(3)
+                            login_success = login(driver, current_account["email"],
+                                                  current_account["password"])
+                        if not login_success:
+                            print_error(f"Login gagal untuk {akun_email}")
+                            close_driver(driver)
+                            driver = None
+                            _bot_state["driver"] = None
+                            next_idx = skip_account(
+                                akun_email, "banned", akun_status,
+                                accounts, config, foto_gagal=filename
+                            )
+                            if next_idx == -1:
+                                display_all_accounts_down(akun_status, len(pending_photos) - i)
+                                break
+                            current_account_idx = next_idx
+                            continue
+
+                # ----- 7c: Cek sesi login (untuk driver yang sudah ada) -----
+                elif not is_logged_in(driver):
                     print_warning(f"Sesi expired untuk {akun_email}, re-login...")
                     login_success = login(driver, current_account["email"],
                                          current_account["password"])
@@ -541,6 +630,7 @@ def run_bot():
 
                 if success:
                     total_sukses += 1
+                    session_upload_count[akun_email] = session_upload_count.get(akun_email, 0) + 1
                     consecutive_fails[akun_email] = 0
                     print_success(f"Berhasil upload: {filename}")
                 else:
@@ -568,11 +658,11 @@ def run_bot():
                 _bot_state["total_gagal"]     = total_gagal
                 _bot_state["status_terakhir"] = status
                 _bot_state["upload_count_per_akun"][akun_email] = \
-                    logger.get_account_upload_count(akun_email)
+                    session_upload_count.get(akun_email, 0)
 
                 _save_state_now()
 
-                akun_upload_count = logger.get_account_upload_count(akun_email)
+                akun_upload_count = session_upload_count.get(akun_email, 0)
                 sisa_foto = len(pending_photos) - (i + 1)
 
                 display_status_table(
@@ -618,6 +708,11 @@ def run_bot():
 
     finally:
         if driver:
+            try:
+                print_info("Logout sebelum menutup browser...")
+                logout(driver)
+            except Exception:
+                pass
             try:
                 close_driver(driver)
             except Exception:
