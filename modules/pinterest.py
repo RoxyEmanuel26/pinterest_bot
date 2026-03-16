@@ -74,6 +74,8 @@ arguments[0].click();
 """
 
 
+
+
 # ══════════════════════════════════════════════════════════════
 #  ELEMENT FINDERS (cepat, tanpa WebDriverWait)
 # ══════════════════════════════════════════════════════════════
@@ -416,119 +418,113 @@ def upload_pin(driver, image_path: str, title: str,
         # ── 2. Upload gambar ────────────────────────────────────────
         file_input.send_keys(os.path.abspath(image_path))
         print_info(f"   Mengirim file: {os.path.basename(image_path)}")
+        
+        time.sleep(1) # Tunggu sejenak agar React selesai render komponen form setelah gambar dimuat
 
-        # Tunggu field judul muncul = gambar sudah diproses server
-        title_el = _wait_for_visible(driver, [
-            'input[data-test-id="pin-draft-title"]',
-            'input[placeholder="Tambahkan judul"]',
-            'input[placeholder="Add a title"]',
-            'input[placeholder*="judul" i]',
-            'input[placeholder*="title" i]',
-        ], timeout=5)
-
-        if not title_el:
-            print_warning("Field judul tidak muncul, lanjutkan...")
-            time.sleep(1)
-            title_el = _find_visible(driver, [
-                'input[data-test-id="pin-draft-title"]',
-                'input[placeholder*="judul" i]',
-                'input[placeholder*="title" i]',
-            ])
-
-        # ── 3. Isi Judul ────────────────────────────────────────────
-        if title_el and title:
-            driver.execute_script(_JS_SCROLL_CLICK, title_el)
-            _fill(driver, title_el, title)
-
-        # ── 4. Isi Deskripsi (contenteditable) ─────────────────────
-        desc_el = _find_visible(driver, [
-            '[data-test-id="pin-draft-description"]',
-            'div[contenteditable="true"][data-test-id*="description"]',
-            'p[data-test-id="pin-draft-description"]',
-        ])
-
-        # Fallback: cari semua contenteditable dan ambil yang relevan
-        if not desc_el:
-            ces = driver.find_elements(
-                By.CSS_SELECTOR,
-                'div[contenteditable="true"], p[contenteditable="true"]'
-            )
-            for ce in ces:
+        # ── 3. Isi Judul (Pure Native Selenium) ─────────────────────
+        if title:
+            for attempt in range(3):
                 try:
-                    driver.execute_script(
-                        "arguments[0].scrollIntoView({block:'center'})", ce)
-                    if ce.is_displayed():
-                        desc_el = ce
+                    title_el = _wait_for_visible(driver, [
+                        'input[data-test-id="pin-draft-title"]',
+                        'input[id="storyboard-selector-title"]',
+                        'input[placeholder*="judul" i]',
+                        'input[placeholder*="title" i]'
+                    ], timeout=5)
+                    if title_el:
+                        title_el.click()
+                        time.sleep(0.1)
+                        title_el.clear()
+                        title_el.send_keys(title)
+                        print_info("   ✅ Judul terisi")
                         break
                 except Exception:
-                    continue
+                    time.sleep(0.3)
 
-        if desc_el and description:
-            driver.execute_script(_JS_SCROLL_CLICK, desc_el)
-            _fill(driver, desc_el, description)
-        elif not desc_el:
-            print_warning("Field deskripsi tidak ditemukan")
+        # ── 4. Isi Deskripsi (Pure Native Selenium) ──────────────────
+        if description:
+            for attempt in range(3):
+                try:
+                    desc_el = _wait_for_visible(driver, [
+                        'div[data-test-id="pin-draft-description"] div[role="textbox"]',
+                        'div[data-test-id="pin-draft-description"] [contenteditable="true"]',
+                        'div[data-test-id="storyboard-selector-description"] div[contenteditable="true"]',
+                        'div[role="textbox"][contenteditable="true"]',
+                        'div[contenteditable="true"]'
+                    ], timeout=5)
+                    if desc_el:
+                        desc_el.click()
+                        time.sleep(0.1)
+                        # Select all existing text and replace
+                        desc_el.send_keys(Keys.CONTROL, "a")
+                        time.sleep(0.05)
+                        desc_el.send_keys(description)
+                        print_info("   ✅ Deskripsi terisi")
+                        break
+                except Exception:
+                    time.sleep(0.3)
 
-        # ── 5. Isi Link/Tautan ──────────────────────────────────────
+        # ── 5. Isi Tautan/Link (Pure Native Selenium) ────────────────
         if link_url:
-            lf = _find_visible(driver, [
-                'input[data-test-id="pin-draft-link"]',
-                'input[placeholder="Tambahkan tautan"]',
-                'input[placeholder="Add a destination link"]',
-                'input[placeholder*="tautan" i]',
-                'input[placeholder*="destination" i]',
-                'input[placeholder*="link" i]',
-            ])
-            if lf:
-                driver.execute_script(_JS_SCROLL_CLICK, lf)
-                _fill(driver, lf, link_url)
-            else:
-                print_warning("Field tautan tidak ditemukan")
+            for attempt in range(3):
+                try:
+                    lf = _wait_for_visible(driver, [
+                        'input[id="storyboard-selector-link"]',
+                        'input[data-test-id="pin-draft-link"]',
+                        'input[placeholder*="tautan" i]',
+                        'input[placeholder*="link" i]',
+                        'textarea[placeholder*="tautan" i]',
+                        'textarea[placeholder*="link" i]'
+                    ], timeout=5)
+                    if lf:
+                        lf.click()
+                        time.sleep(0.1)
+                        lf.clear()
+                        lf.send_keys(link_url)
+                        # Tekan TAB untuk memaksa blur event → React register value
+                        lf.send_keys(Keys.TAB)
+                        print_info("   ✅ Tautan terisi")
+                        break
+                except Exception:
+                    time.sleep(0.3)
 
         # ── 6. Pilih Board ──────────────────────────────────────────
         _select_board(driver, board_name)
 
-        # ── 7. Klik Publish (Tunggu gambar siap) ──────────────────────
-        published = False
-        publish_selectors = [
-            'button[data-test-id="board-dropdown-save-button"]',
-            'button[data-test-id="create-pin-save-button"]',
-            'div[data-test-id="pin-draft-save-button"] button',
-            'button[aria-label="Terbitkan"]',
-            'button[aria-label="Simpan"]',
-            'button[aria-label="Publish"]',
-            'button[aria-label="Save"]',
-        ]
+        # ── 7. Klik Tombol Terbitkan ─────────────────────────────────
+        print_info("   Mencari tombol Terbitkan...")
+        time.sleep(1)
 
-        wait30 = WebDriverWait(driver, 30)
-        
-        # Pinterest disable tombol Save/Publish selama gambar masih diupload.
-        # Kita harus tunggu sampai elemen tersebut Clickable.
-        for selector in publish_selectors:
+        published = False
+        timeout_end = time.time() + 30
+
+        while time.time() < timeout_end:
             try:
-                pub_btn = wait30.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
-                if pub_btn and pub_btn.is_displayed():
-                    pub_btn.click()
-                    published = True
-                    break
-            except (TimeoutException, NoSuchElementException, ElementNotInteractableException):
-                continue
-                
-        # Jika belum terklik, coba cari dengan fallback text
-        if not published:
-            for btn in driver.find_elements(By.TAG_NAME, 'button'):
-                try:
-                    if btn.text.strip().lower() in ('terbitkan', 'simpan', 'publish', 'save'):
-                        # Jangan klik jika button aria-disabled (sedang upload)
-                        if btn.is_displayed() and btn.is_enabled() and btn.get_attribute('aria-disabled') != 'true':
-                            driver.execute_script(_JS_SCROLL_CLICK, btn)
+                # Cari SEMUA button di halaman
+                all_btns = driver.find_elements(By.TAG_NAME, 'button')
+                for btn in all_btns:
+                    try:
+                        txt = btn.text.strip().lower()
+                        if txt in ('terbitkan', 'publish', 'simpan', 'save'):
+                            # Klik langsung pakai Selenium native click
+                            driver.execute_script(
+                                "arguments[0].scrollIntoView({block:'center'})", btn)
+                            btn.click()
+                            print_info("   ✅ Tombol Terbitkan diklik!")
                             published = True
                             break
-                except Exception:
-                    continue
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            if published:
+                break
+
+            time.sleep(1)
 
         if not published:
-            print_error("Tombol Publish tidak ditemukan / gagal diklik")
+            print_error("Tombol Publish tidak ditemukan / gagal diklik / timeout")
             return False
 
         # ── 8. Tunggu konfirmasi upload selesai (Toast) ──────────────
