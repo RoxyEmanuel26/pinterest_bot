@@ -342,7 +342,8 @@ def _select_board(driver, board_name: str) -> bool:
 
 
 def upload_pin(driver, image_path: str, title: str, 
-               description: str, board_name: str) -> bool:
+               description: str, board_name: str,
+               link_url: str = "") -> bool:
     """
     Upload satu pin ke Pinterest.
     
@@ -351,8 +352,9 @@ def upload_pin(driver, image_path: str, title: str,
     2. Upload gambar
     3. Isi judul
     4. Isi deskripsi
-    5. Pilih board
-    6. Publish pin
+    5. Isi destination link (jika ada)
+    6. Pilih board
+    7. Publish pin
     
     Args:
         driver: Instance Chrome WebDriver
@@ -360,6 +362,7 @@ def upload_pin(driver, image_path: str, title: str,
         title: Judul pin
         description: Deskripsi pin (termasuk hashtag)
         board_name: Nama board tujuan
+        link_url: URL destination link (opsional, kosong = tidak diisi)
     
     Returns:
         True jika upload berhasil, False jika gagal
@@ -476,6 +479,47 @@ def upload_pin(driver, image_path: str, title: str,
             human_type(desc_field, description)
             short_delay(1.0, 2.0)
         
+        # Step 3.5: Isi destination link (jika ada)
+        if link_url:
+            link_selectors = [
+                'input[data-test-id="pin-draft-link"]',
+                'input[id="pin-draft-link"]',
+                'input[placeholder*="link" i]',
+                'input[placeholder*="url" i]',
+                'input[placeholder*="website" i]',
+                'input[name="link"]',
+                'input[aria-label*="link" i]',
+                'input[aria-label*="destination" i]',
+            ]
+            
+            link_field = None
+            for selector in link_selectors:
+                try:
+                    link_field = driver.find_element(By.CSS_SELECTOR, selector)
+                    if link_field:
+                        break
+                except NoSuchElementException:
+                    continue
+            
+            if not link_field:
+                # Coba XPath
+                try:
+                    link_field = driver.find_element(By.XPATH,
+                        '//input[contains(@placeholder, "Add a destination link")] | '
+                        '//input[contains(@placeholder, "destination")] | '
+                        '//input[contains(@placeholder, "link")]')
+                except NoSuchElementException:
+                    pass
+            
+            if link_field:
+                link_field.clear()
+                short_delay(0.5, 1.0)
+                human_type(link_field, link_url)
+                short_delay(1.0, 2.0)
+                print_info(f"   Link: {link_url}")
+            else:
+                print_warning("Tidak bisa menemukan field Destination Link")
+        
         # Step 4: Pilih board
         _select_board(driver, board_name)
         short_delay(1.0, 2.0)
@@ -555,6 +599,7 @@ def upload_pin(driver, image_path: str, title: str,
 
 def upload_with_retry(driver, image_path: str, title: str,
                       description: str, board_name: str,
+                      link_url: str = "",
                       max_retries: int = 3) -> bool:
     """
     Upload pin dengan mekanisme retry.
@@ -568,6 +613,7 @@ def upload_with_retry(driver, image_path: str, title: str,
         title: Judul pin
         description: Deskripsi pin
         board_name: Nama board tujuan
+        link_url: URL destination link (opsional)
         max_retries: Jumlah maksimum percobaan ulang
     
     Returns:
@@ -577,7 +623,8 @@ def upload_with_retry(driver, image_path: str, title: str,
         try:
             print_info(f"Upload attempt {attempt}/{max_retries}: {os.path.basename(image_path)}")
             
-            success = upload_pin(driver, image_path, title, description, board_name)
+            success = upload_pin(driver, image_path, title, description, 
+                               board_name, link_url)
             
             if success:
                 return True

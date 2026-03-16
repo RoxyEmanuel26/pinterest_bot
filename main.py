@@ -24,13 +24,13 @@ from rich.prompt import Prompt, Confirm
 from modules.browser import create_driver, close_driver, random_delay
 from modules.pinterest import is_logged_in, login, logout, upload_pin, upload_with_retry
 from modules.file_manager import scan_photos, prepare_photo
-from modules.hashtag import generate_title, generate_hashtags, build_description
+from modules.hashtag import generate_title, generate_hashtags, build_description, gabungkan_hashtag
 from modules.logger import (
     UploadLogger, create_progress_bar,
     display_status_table, display_initial_info, display_summary,
     print_success, print_error, print_warning, print_info, console,
 )
-from modules.notifier import notify_start, notify_switch, notify_done, notify_error
+from modules.notifier import send_all_notifications
 
 
 # Path default
@@ -75,7 +75,7 @@ def load_config(config_path: str) -> dict:
         print_error("Minimal 1 akun harus dikonfigurasi di config.json")
         sys.exit(1)
     
-    # Set default values
+    # Set default values (global)
     config.setdefault("max_upload_per_akun", 50)
     config.setdefault("delay_min", 8)
     config.setdefault("delay_max", 20)
@@ -86,6 +86,14 @@ def load_config(config_path: str) -> dict:
     config.setdefault("watermark_opacity", 0.8)
     config.setdefault("telegram_bot_token", "")
     config.setdefault("telegram_chat_id", "")
+    config.setdefault("discord_webhook_url", "")
+    
+    # Set default values per akun
+    for acc in config["accounts"]:
+        acc.setdefault("judul_template", "")
+        acc.setdefault("hashtag_custom", [])
+        acc.setdefault("link_url", "")
+        acc.setdefault("deskripsi_template", "")
     
     return config
 
@@ -158,7 +166,7 @@ def run_bot():
     3. Watermark + optimasi semua foto pending
     4. Tampilkan info awal + minta konfirmasi
     5. Loop upload dengan rotasi akun
-    6. Summary akhir + notifikasi Telegram
+    6. Summary akhir + notifikasi Telegram & Discord
     """
     start_time = datetime.now()
     
@@ -173,8 +181,6 @@ def run_bot():
     headless = config["headless_mode"]
     max_hashtag = config["max_hashtag"]
     deskripsi_mode = config.get("deskripsi_mode", "auto")
-    telegram_token = config.get("telegram_bot_token", "")
-    telegram_chat_id = config.get("telegram_chat_id", "")
     accounts = config["accounts"]
     
     # ===== STEP 2: Scan Foto =====
@@ -201,6 +207,7 @@ def run_bot():
     # ===== STEP 4: Tampilkan Info Awal =====
     avg_delay = (delay_min + delay_max) / 2
     estimasi_menit = (len(pending_photos) * avg_delay) / 60
+    estimasi_str = f"{estimasi_menit:.1f} menit"
     
     display_initial_info(
         total_foto=len(pending_photos),
@@ -223,12 +230,13 @@ def run_bot():
     console.print()
     print_info("Memulai proses upload...")
     
-    # Kirim notifikasi Telegram - program mulai
-    notify_start(
-        telegram_token, telegram_chat_id,
+    # Kirim notifikasi - program mulai (Telegram + Discord)
+    send_all_notifications(config, "start",
         total_foto=len(pending_photos),
         total_akun=len(accounts),
         akun_pertama=accounts[0]["email"],
+        foto_folder=foto_folder,
+        estimasi=estimasi_str,
     )
     
     # State variables
@@ -246,8 +254,8 @@ def run_bot():
             break
     else:
         print_warning("Semua akun sudah mencapai batas upload!")
-        notify_error(telegram_token, telegram_chat_id, 
-                    "Semua akun sudah mencapai batas upload")
+        send_all_notifications(config, "error",
+            error_msg="Semua akun sudah mencapai batas upload")
         sys.exit(0)
     
     try:
@@ -283,9 +291,8 @@ def run_bot():
                         next_email = accounts[next_idx]["email"]
                         next_count = logger.get_account_upload_count(next_email)
                         if next_count < max_upload:
-                            # Kirim notifikasi ganti akun
-                            notify_switch(
-                                telegram_token, telegram_chat_id,
+                            # Kirim notifikasi ganti akun (Telegram + Discord)
+                            send_all_notifications(config, "switch",
                                 akun_lama=akun_email,
                                 akun_baru=next_email,
                                 upload_count=akun_upload_count,
@@ -299,8 +306,9 @@ def run_bot():
                     
                     if not found_next:
                         print_warning("Semua akun sudah mencapai batas upload!")
-                        notify_error(telegram_token, telegram_chat_id,
-                                    "Semua akun mencapai batas upload, program berhenti")
+                        send_all_notifications(config, "error",
+                            error_msg="Semua akun mencapai batas upload, program berhenti",
+                            akun=akun_email)
                         break
                 
                 akun_digunakan.add(akun_email)
@@ -317,8 +325,9 @@ def run_bot():
                         )
                     except Exception as e:
                         print_error(f"Gagal membuat Chrome driver: {e}")
-                        notify_error(telegram_token, telegram_chat_id,
-                                    f"Gagal membuat Chrome driver: {e}", akun_email)
+                        send_all_notifications(config, "error",
+                            error_msg=f"Gagal membuat Chrome driver: {e}",
+                            akun=akun_email)
                         break
                 
                 # ----- 6b: Cek sesi login -----
@@ -367,20 +376,35 @@ def run_bot():
                             break
                 
                 # ----- 6c: Generate judul + deskripsi + hashtag -----
-                title = generate_title(filename)
-                hashtags = generate_hashtags(filename, max_count=max_hashtag)
+                # Judul: pakai judul_template jika ada, else dari nama file
+                judul_template = current_account.get("judul_template", "")
+                if judul_template:
+                    title = judul_template
+                else:
+                    title = generate_title(filename)
+                
+                # Hashtag: gabungkan auto + custom
+                hashtag_auto = generate_hashtags(filename, max_count=max_hashtag)
+                hashtag_custom = current_account.get("hashtag_custom", [])
+                hashtags = gabungkan_hashtag(hashtag_auto, hashtag_custom, max_total=max_hashtag)
                 hashtag_str = " ".join(hashtags)
                 
+                # Deskripsi
                 if deskripsi_mode == "manual" and manual_description:
                     description = build_description(manual_description, hashtags)
                 else:
                     template = current_account.get("deskripsi_template", "")
                     description = build_description(template, hashtags)
                 
+                # Link URL
+                link_url = current_account.get("link_url", "")
+                
                 # ----- 6d: Upload pin dengan retry -----
                 print_info(f"📤 Uploading: {filename}")
                 print_info(f"   Judul: {title}")
                 print_info(f"   Board: {current_account['board']}")
+                if link_url:
+                    print_info(f"   Link: {link_url}")
                 
                 success = upload_with_retry(
                     driver=driver,
@@ -388,6 +412,7 @@ def run_bot():
                     title=title,
                     description=description,
                     board_name=current_account["board"],
+                    link_url=link_url,
                     max_retries=3,
                 )
                 
@@ -425,6 +450,16 @@ def run_bot():
                 # Update progress bar
                 progress.update(upload_task, advance=1)
                 
+                # ----- 6f.1: Discord progress notification (tiap 10 pin) -----
+                if total_sukses > 0 and total_sukses % 10 == 0:
+                    send_all_notifications(config, "progress",
+                        akun_aktif=akun_email,
+                        upload_count=akun_upload_count,
+                        max_upload=max_upload,
+                        sisa_foto=sisa_foto,
+                        board=current_account["board"],
+                    )
+                
                 # ----- 6g: Random delay -----
                 if i < len(pending_photos) - 1:  # Tidak perlu delay di upload terakhir
                     delay = random_delay(delay_min, delay_max)
@@ -434,8 +469,10 @@ def run_bot():
     
     except Exception as e:
         print_error(f"Error tidak terduga: {e}")
-        notify_error(telegram_token, telegram_chat_id, str(e),
-                    accounts[current_account_idx]["email"] if current_account_idx < len(accounts) else "")
+        send_all_notifications(config, "error",
+            error_msg=str(e),
+            akun=accounts[current_account_idx]["email"] if current_account_idx < len(accounts) else "",
+            foto_terakhir=filename if 'filename' in dir() else "")
     
     finally:
         # Tutup driver jika masih terbuka
@@ -454,9 +491,8 @@ def run_bot():
         akun_digunakan=list(akun_digunakan),
     )
     
-    # ===== STEP 8: Notifikasi Telegram =====
-    notify_done(
-        telegram_token, telegram_chat_id,
+    # ===== STEP 8: Notifikasi Selesai (Telegram + Discord) =====
+    send_all_notifications(config, "done",
         total_sukses=total_sukses,
         total_gagal=total_gagal,
         durasi=durasi_str,

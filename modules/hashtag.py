@@ -124,14 +124,62 @@ def build_description(template: str, hashtags: list[str]) -> str:
         return ""
 
 
+def gabungkan_hashtag(hashtag_auto: list[str], hashtag_custom: list[str],
+                      max_total: int = 10) -> list[str]:
+    """
+    Gabungkan hashtag dari auto-generate (nama file) dengan hashtag custom dari config.
+    
+    Hashtag custom diletakkan di depan, lalu ditambahkan hashtag auto.
+    Duplikat dihapus (case-insensitive) dan total dibatasi max_total.
+    
+    Args:
+        hashtag_auto: List hashtag dari auto-generate nama file
+                      (contoh: ["#sunset", "#beach", "#bali"])
+        hashtag_custom: List hashtag custom dari config.json
+                        (contoh: ["#aesthetic", "#viral", "#fyp"])
+        max_total: Jumlah maksimum hashtag gabungan
+    
+    Returns:
+        List hashtag gabungan tanpa duplikat, dibatasi max_total
+        (contoh: ["#aesthetic", "#viral", "#fyp", "#sunset", "#beach", "#bali"])
+    """
+    combined = []
+    seen = set()
+    
+    # Tambahkan hashtag custom terlebih dahulu (prioritas)
+    for tag in hashtag_custom:
+        # Pastikan format #hashtag
+        tag_clean = tag.strip()
+        if not tag_clean.startswith("#"):
+            tag_clean = f"#{tag_clean}"
+        
+        tag_lower = tag_clean.lower()
+        if tag_lower not in seen:
+            combined.append(tag_clean)
+            seen.add(tag_lower)
+    
+    # Tambahkan hashtag auto-generate
+    for tag in hashtag_auto:
+        tag_lower = tag.lower()
+        if tag_lower not in seen:
+            combined.append(tag)
+            seen.add(tag_lower)
+    
+    return combined[:max_total]
+
+
 if __name__ == "__main__":
     # Test module
     test_file = "sunset_beach_bali_golden_hour.jpg"
     print(f"File    : {test_file}")
     print(f"Judul   : {generate_title(test_file)}")
     
-    tags = generate_hashtags(test_file, max_count=10)
-    print(f"Hashtag : {tags}")
+    tags_auto = generate_hashtags(test_file, max_count=10)
+    print(f"Auto Hashtag : {tags_auto}")
     
-    desc = build_description("Follow untuk konten lebih lanjut!", tags)
-    print(f"Deskripsi: {desc}")
+    custom = ["#aesthetic", "#viral", "#fyp"]
+    tags_gabungan = gabungkan_hashtag(tags_auto, custom, max_total=10)
+    print(f"Gabungan     : {tags_gabungan}")
+    
+    desc = build_description("Follow untuk konten lebih lanjut!", tags_gabungan)
+    print(f"Deskripsi    : {desc}")

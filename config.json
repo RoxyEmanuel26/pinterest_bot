@@ -10,34 +10,47 @@
   "watermark_opacity": 0.8,
   "telegram_bot_token": "",
   "telegram_chat_id": "",
+  "discord_webhook_url": "",
   "accounts": [
     {
       "email": "bimanntara26@gmail.com",
       "password": "-",
       "board": "Nama Board 1",
       "chrome_profile_path": "E:/00 projek rumah/antigravity/pinterest auto",
-      "deskripsi_template": "Follow untuk konten lebih lanjut!"
+      "judul_template": "",
+      "deskripsi_template": "Follow untuk konten lebih lanjut!",
+      "hashtag_custom": ["#aesthetic", "#viral", "#fyp", "#trending"],
+      "link_url": "https://www.kumpulenak.web.id"
     },
     {
       "email": "bima260398@gmail.com",
       "password": "-",
       "board": "Nama Board 2",
       "chrome_profile_path": "E:/00 projek rumah/antigravity/pinterest auto",
-      "deskripsi_template": "Download full https://www.kumpulenak.web.id"
+      "judul_template": "",
+      "deskripsi_template": "Download full https://www.kumpulenak.web.id",
+      "hashtag_custom": ["#aesthetic", "#viral", "#fyp", "#trending"],
+      "link_url": "https://www.kumpulenak.web.id"
     },
     {
       "email": "bimaroxy3@gmail.com",
       "password": "-",
       "board": "Nama Board 3",
       "chrome_profile_path": "E:/00 projek rumah/antigravity/pinterest auto",
-      "deskripsi_template": "Download full https://www.kumpulenak.web.id"
+      "judul_template": "",
+      "deskripsi_template": "Download full https://www.kumpulenak.web.id",
+      "hashtag_custom": ["#aesthetic", "#viral", "#fyp", "#trending"],
+      "link_url": "https://www.kumpulenak.web.id"
     },
     {
       "email": "raincer3@gmail.com",
       "password": "-",
       "board": "Nama Board 4",
       "chrome_profile_path": "E:/00 projek rumah/antigravity/pinterest auto",
-      "deskripsi_template": "Download full https://www.kumpulenak.web.id"
+      "judul_template": "",
+      "deskripsi_template": "Download full https://www.kumpulenak.web.id",
+      "hashtag_custom": ["#aesthetic", "#viral", "#fyp", "#trending"],
+      "link_url": "https://www.kumpulenak.web.id"
     }
   ]
 }
