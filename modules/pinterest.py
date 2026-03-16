@@ -124,7 +124,7 @@ def _find_visible(driver, css_list: list, xpath: str = None):
     return None
 
 
-def _wait_for_any(driver, css_list: list, timeout: int = 30):
+def _wait_for_any(driver, css_list: list, timeout: int = 5):
     """Tunggu elemen ada di DOM (tidak harus visible)."""
     end = time.time() + timeout
     while time.time() < end:
@@ -139,7 +139,7 @@ def _wait_for_any(driver, css_list: list, timeout: int = 30):
     return None
 
 
-def _wait_for_visible(driver, css_list: list, timeout: int = 30):
+def _wait_for_visible(driver, css_list: list, timeout: int = 5):
     """Tunggu elemen visible + dalam viewport."""
     end = time.time() + timeout
     while time.time() < end:
@@ -211,7 +211,7 @@ def _fill_topics(driver, topics: list) -> None:
     if not tf:
         # Coba scroll ke bawah dulu, mungkin field topik ada di bawah
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
-        time.sleep(0.5)
+        time.sleep(0.1)
         tf = _find_visible(driver, topic_selectors)
 
     if not tf:
@@ -223,7 +223,7 @@ def _fill_topics(driver, topics: list) -> None:
             tf.click()
             tf.clear()
             tf.send_keys(topic)
-            time.sleep(0.6)  # Tunggu autocomplete muncul
+            time.sleep(0.2)  # Tunggu autocomplete muncul
 
             # Coba klik suggestion pertama
             suggestion_found = False
@@ -299,7 +299,7 @@ def login(driver, email: str, password: str) -> bool:
     try:
         print_info(f"Memulai login untuk {email}...")
         driver.get(PINTEREST_LOGIN)
-        time.sleep(3)
+        time.sleep(2)
         wait = WebDriverWait(driver, 15)
 
         try:
@@ -313,9 +313,9 @@ def login(driver, email: str, password: str) -> bool:
             return False
 
         email_field.clear()
-        time.sleep(0.3)
+        time.sleep(0.1)
         human_type(email_field, email)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
         try:
             pwd = driver.find_element(By.CSS_SELECTOR, 'input[id="password"]')
@@ -323,25 +323,25 @@ def login(driver, email: str, password: str) -> bool:
             pwd = driver.find_element(By.CSS_SELECTOR, 'input[name="password"]')
 
         pwd.clear()
-        time.sleep(0.3)
+        time.sleep(0.1)
         human_type(pwd, password)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
         try:
             driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
         except NoSuchElementException:
             pwd.send_keys(Keys.RETURN)
 
-        time.sleep(5)
+        time.sleep(3)
 
         src = driver.page_source.lower()
         url = driver.current_url
         if "challenge" in url or "captcha" in src or "verify" in url:
             print_warning("\u26a0\ufe0f CAPTCHA terdeteksi! Selesaikan manual.")
             input("Tekan ENTER setelah CAPTCHA selesai...")
-            time.sleep(2)
+            time.sleep(1)
 
-        time.sleep(3)
+        time.sleep(2)
         if "/login" not in driver.current_url:
             print_success(f"Login berhasil: {email}")
             return True
@@ -379,18 +379,18 @@ def _select_board(driver, board_name: str) -> bool:
             'button[data-test-id="board-dropdown-select-button"]',
             'button[data-test-id="boardDropdownSelectButton"]',
             'div[data-test-id="board-dropdown-select-button"]',
-        ], timeout=10)
+        ], timeout=3)
 
         if board_btn:
             driver.execute_script(_JS_SCROLL_CLICK, board_btn)
-            time.sleep(0.5)
+            time.sleep(0.1)
         else:
             els = driver.find_elements(By.XPATH,
                 '//button[contains(text(),"Choose a board")]'
                 '|//button[contains(text(),"Pilih papan")]')
             if els:
                 driver.execute_script(_JS_SCROLL_CLICK, els[0])
-                time.sleep(0.5)
+                time.sleep(0.1)
 
         # Cari dan isi search field board
         sf = _find_visible(driver, [
@@ -402,7 +402,7 @@ def _select_board(driver, board_name: str) -> bool:
         if sf:
             sf.clear()
             sf.send_keys(board_name)
-            time.sleep(0.6)
+            time.sleep(0.2)
 
         # Klik nama board yang tepat
         opts = driver.find_elements(By.XPATH,
@@ -411,7 +411,7 @@ def _select_board(driver, board_name: str) -> bool:
             try:
                 if opt.is_displayed():
                     driver.execute_script(_JS_SCROLL_CLICK, opt)
-                    time.sleep(0.3)
+                    time.sleep(0.1)
                     return True
             except Exception:
                 continue
@@ -426,7 +426,7 @@ def _select_board(driver, board_name: str) -> bool:
             if opts:
                 try:
                     driver.execute_script(_JS_SCROLL_CLICK, opts[0])
-                    time.sleep(0.3)
+                    time.sleep(0.1)
                     return True
                 except Exception:
                     continue
@@ -468,11 +468,11 @@ def upload_pin(driver, image_path: str, title: str,
             'input[type="file"]',
             'input[accept*="image"]',
             'input[accept*="image/"]',
-        ], timeout=30)
+        ], timeout=5)
 
         if not file_input:
             print_warning("input[type=file] tidak ditemukan, fallback 3 detik...")
-            time.sleep(3)
+            time.sleep(1)
             file_input = _find_any(driver, [
                 'input[type="file"]',
                 'input[accept*="image"]',
@@ -492,11 +492,11 @@ def upload_pin(driver, image_path: str, title: str,
             'input[placeholder="Add a title"]',
             'input[placeholder*="judul" i]',
             'input[placeholder*="title" i]',
-        ], timeout=30)
+        ], timeout=5)
 
         if not title_el:
             print_warning("Field judul tidak muncul, lanjutkan...")
-            time.sleep(3)
+            time.sleep(1)
             title_el = _find_visible(driver, [
                 'input[data-test-id="pin-draft-title"]',
                 'input[placeholder*="judul" i]',
@@ -617,7 +617,7 @@ def upload_with_retry(driver, image_path: str, title: str,
                           board_name, link_url, topics):
                 return True
             if attempt < max_retries:
-                backoff = attempt * random.uniform(4.0, 7.0)
+                backoff = attempt * random.uniform(1.0, 4.0)
                 print_warning(f"Gagal, retry dalam {backoff:.0f} detik...")
                 time.sleep(backoff)
         except Exception as e:
