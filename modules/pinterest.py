@@ -89,14 +89,47 @@ def _find(driver, css_list: list, xpath: str = None):
     return None
 
 
-def _wait_for(driver, css_list: list, timeout: int = 25):
-    """Tunggu sampai salah satu elemen dari css_list muncul di DOM."""
+def _find_any(driver, css_list: list):
+    """
+    Cari elemen dari list CSS selector TANPA cek is_displayed().
+    Digunakan untuk elemen hidden seperti input[type=file].
+    """
+    for css in css_list:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, css)
+            if els:
+                return els[0]
+        except Exception:
+            continue
+    return None
+
+
+def _wait_for_visible(driver, css_list: list, timeout: int = 25):
+    """Tunggu sampai salah satu elemen VISIBLE dari css_list muncul."""
     end = time.time() + timeout
     while time.time() < end:
         for css in css_list:
             try:
                 els = driver.find_elements(By.CSS_SELECTOR, css)
                 if els and els[0].is_displayed():
+                    return els[0]
+            except Exception:
+                continue
+        time.sleep(0.3)
+    return None
+
+
+def _wait_for_any(driver, css_list: list, timeout: int = 25):
+    """
+    Tunggu sampai salah satu elemen dari css_list ada di DOM
+    (tidak perlu visible — untuk input[type=file] yang hidden).
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        for css in css_list:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, css)
+                if els:
                     return els[0]
             except Exception:
                 continue
@@ -299,27 +332,43 @@ def upload_pin(driver, image_path: str, title: str,
     Upload pin ke Pinterest secara instan.
     Semua field diisi via JavaScript injection — tidak ada ngetik per karakter.
     Estimasi: 15-25 detik per pin termasuk upload gambar.
+
+    PENTING: input[type=file] di Pinterest adalah elemen HIDDEN (display:none),
+    sehingga harus dicari dengan find_elements tanpa cek is_displayed().
     """
     try:
         # ── 1. Buka halaman create pin ──────────────────────────────
         driver.get(PINTEREST_CREATE_PIN)
 
-        # Tunggu input[type=file] muncul (max 15 detik)
-        file_input = _wait_for(driver, [
+        # Tunggu halaman load: cari input[type=file] di DOM (bisa hidden)
+        # Timeout diperbesar ke 30 detik untuk koneksi lambat
+        file_input = _wait_for_any(driver, [
             'input[type="file"]',
             'input[accept*="image"]',
-        ], timeout=15)
+            'input[accept*="image/"]',
+        ], timeout=30)
 
         if not file_input:
-            print_error("Halaman create pin tidak termuat")
-            return False
+            # Fallback: cek apakah halaman sudah load dengan cara lain
+            # Mungkin Pinterest mengganti struktur halaman
+            print_warning("input[type=file] tidak ditemukan, coba fallback...")
+            # Tunggu body load dulu
+            time.sleep(3)
+            file_input = _find_any(driver, [
+                'input[type="file"]',
+                'input[accept*="image"]',
+            ])
+            if not file_input:
+                print_error("Halaman create pin tidak termuat (input file tidak ada)")
+                return False
 
         # ── 2. Upload gambar ────────────────────────────────────────
-        file_input.send_keys(os.path.abspath(image_path))
+        absolute_path = os.path.abspath(image_path)
+        file_input.send_keys(absolute_path)
         print_info(f"   Mengirim file: {os.path.basename(image_path)}")
 
-        # Tunggu field judul muncul = tanda gambar sudah diproses
-        title_appeared = _wait_for(driver, [
+        # Tunggu field judul muncul = tanda gambar sudah diproses oleh Pinterest
+        title_appeared = _wait_for_visible(driver, [
             'input[data-test-id="pin-draft-title"]',
             'input[placeholder="Tambahkan judul"]',
             'input[placeholder="Add a title"]',
@@ -328,7 +377,7 @@ def upload_pin(driver, image_path: str, title: str,
         ], timeout=30)
 
         if not title_appeared:
-            print_warning("Field judul tidak muncul, lanjutkan...")
+            print_warning("Field judul tidak muncul setelah upload, lanjutkan...")
             time.sleep(3)
 
         # ── 3. Isi Judul — instan ───────────────────────────────────
@@ -400,7 +449,7 @@ def upload_pin(driver, image_path: str, title: str,
         if not published:
             for btn in driver.find_elements(By.TAG_NAME, 'button'):
                 try:
-                    if btn.text.strip().lower() in ('terbitkan','simpan','publish','save'):
+                    if btn.text.strip().lower() in ('terbitkan', 'simpan', 'publish', 'save'):
                         if btn.is_displayed() and btn.is_enabled():
                             btn.click()
                             published = True
