@@ -413,10 +413,14 @@ def upload_pin(driver, image_path: str, title: str,
             short_delay(3.0, 5.0)
         
         # Step 2: Isi judul
+        # Selector Indonesia diletakkan terlebih dahulu, lalu English
         title_selectors = [
             'input[data-test-id="pin-draft-title"]',
             'input[id="pin-draft-title"]',
+            'input[placeholder="Tambahkan judul"]',
+            'input[placeholder*="judul" i]',
             'input[placeholder*="title" i]',
+            'input[placeholder="Add a title"]',
             'input[name="title"]',
             'div[data-test-id="pin-draft-title"] input',
             'textarea[data-test-id="pin-draft-title"]',
@@ -425,17 +429,23 @@ def upload_pin(driver, image_path: str, title: str,
         title_field = None
         for selector in title_selectors:
             try:
-                title_field = driver.find_element(By.CSS_SELECTOR, selector)
-                if title_field:
+                el = driver.find_element(By.CSS_SELECTOR, selector)
+                if el and el.is_displayed():
+                    title_field = el
                     break
             except NoSuchElementException:
                 continue
         
         if not title_field:
-            # Coba dengan XPath
+            # Coba dengan XPath (Indonesia + English)
             try:
                 title_field = driver.find_element(By.XPATH,
-                    '//input[@placeholder="Add a title"] | //input[contains(@placeholder, "title")]')
+                    '//input[@placeholder="Tambahkan judul"] | '
+                    '//input[@placeholder="Add a title"] | '
+                    '//input[contains(@placeholder, "judul")] | '
+                    '//input[contains(@placeholder, "title")]')
+                if title_field and not title_field.is_displayed():
+                    title_field = None
             except NoSuchElementException:
                 pass
         
@@ -446,11 +456,17 @@ def upload_pin(driver, image_path: str, title: str,
             short_delay(1.0, 2.0)
         
         # Step 3: Isi deskripsi
+        # Selector Indonesia diletakkan terlebih dahulu, lalu English
         desc_selectors = [
             'div[data-test-id="pin-draft-description"] .notranslate',
             'div[data-test-id="pin-draft-description"] [contenteditable="true"]',
             'div[role="textbox"][data-test-id="pin-draft-description"]',
             'textarea[data-test-id="pin-draft-description"]',
+            'textarea[placeholder="Ceritakan lebih banyak"]',
+            'textarea[placeholder*="Ceritakan" i]',
+            'div[data-placeholder="Ceritakan lebih banyak"]',
+            'textarea[placeholder*="Tell" i]',
+            'textarea[placeholder*="description" i]',
             'div[class*="Description"] [contenteditable="true"]',
             'div.public-DraftEditor-content',
         ]
@@ -458,18 +474,24 @@ def upload_pin(driver, image_path: str, title: str,
         desc_field = None
         for selector in desc_selectors:
             try:
-                desc_field = driver.find_element(By.CSS_SELECTOR, selector)
-                if desc_field:
+                el = driver.find_element(By.CSS_SELECTOR, selector)
+                if el and el.is_displayed():
+                    desc_field = el
                     break
             except NoSuchElementException:
                 continue
         
         if not desc_field:
-            # Coba dengan XPath
+            # Coba dengan XPath (Indonesia + English)
             try:
                 desc_field = driver.find_element(By.XPATH,
                     '//div[@data-test-id="pin-draft-description"]//div[@contenteditable="true"] | '
-                    '//textarea[contains(@placeholder, "description") or contains(@placeholder, "Tell")]')
+                    '//textarea[@placeholder="Ceritakan lebih banyak"] | '
+                    '//textarea[contains(@placeholder, "Ceritakan")] | '
+                    '//textarea[contains(@placeholder, "description")] | '
+                    '//textarea[contains(@placeholder, "Tell")]')
+                if desc_field and not desc_field.is_displayed():
+                    desc_field = None
             except NoSuchElementException:
                 pass
         
@@ -480,14 +502,20 @@ def upload_pin(driver, image_path: str, title: str,
             short_delay(1.0, 2.0)
         
         # Step 3.5: Isi destination link (jika ada)
+        # Selector Indonesia diletakkan terlebih dahulu, lalu English
         if link_url:
             link_selectors = [
                 'input[data-test-id="pin-draft-link"]',
                 'input[id="pin-draft-link"]',
+                'input[placeholder="Tambahkan tautan"]',
+                'input[placeholder*="tautan" i]',
                 'input[placeholder*="link" i]',
                 'input[placeholder*="url" i]',
+                'input[placeholder="Add a destination link"]',
+                'input[placeholder*="destination" i]',
                 'input[placeholder*="website" i]',
                 'input[name="link"]',
+                'input[aria-label*="tautan" i]',
                 'input[aria-label*="link" i]',
                 'input[aria-label*="destination" i]',
             ]
@@ -495,19 +523,24 @@ def upload_pin(driver, image_path: str, title: str,
             link_field = None
             for selector in link_selectors:
                 try:
-                    link_field = driver.find_element(By.CSS_SELECTOR, selector)
-                    if link_field:
+                    el = driver.find_element(By.CSS_SELECTOR, selector)
+                    if el and el.is_displayed():
+                        link_field = el
                         break
                 except NoSuchElementException:
                     continue
             
             if not link_field:
-                # Coba XPath
+                # Coba XPath (Indonesia + English)
                 try:
                     link_field = driver.find_element(By.XPATH,
+                        '//input[@placeholder="Tambahkan tautan"] | '
+                        '//input[contains(@placeholder, "tautan")] | '
                         '//input[contains(@placeholder, "Add a destination link")] | '
                         '//input[contains(@placeholder, "destination")] | '
                         '//input[contains(@placeholder, "link")]')
+                    if link_field and not link_field.is_displayed():
+                        link_field = None
                 except NoSuchElementException:
                     pass
             
@@ -525,10 +558,13 @@ def upload_pin(driver, image_path: str, title: str,
         short_delay(1.0, 2.0)
         
         # Step 5: Publish pin
+        # Tambahkan label Indonesia (Simpan, Terbitkan)
         publish_selectors = [
             'button[data-test-id="board-dropdown-save-button"]',
             'button[data-test-id="create-pin-save-button"]',
             'div[data-test-id="pin-draft-save-button"] button',
+            'button[aria-label="Terbitkan"]',
+            'button[aria-label="Simpan"]',
             'button[aria-label="Publish"]',
             'button[aria-label="Save"]',
         ]
@@ -539,7 +575,7 @@ def upload_pin(driver, image_path: str, title: str,
                 publish_btn = wait.until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
                 )
-                if publish_btn:
+                if publish_btn and publish_btn.is_displayed():
                     publish_btn.click()
                     published = True
                     break
@@ -548,15 +584,16 @@ def upload_pin(driver, image_path: str, title: str,
                 continue
         
         if not published:
-            # Coba cari tombol Publish / Save dengan teks
+            # Coba cari tombol Publish / Save / Simpan / Terbitkan dengan teks
             try:
                 buttons = driver.find_elements(By.TAG_NAME, 'button')
                 for btn in buttons:
                     btn_text = btn.text.strip().lower()
-                    if btn_text in ('publish', 'save', 'simpan'):
-                        btn.click()
-                        published = True
-                        break
+                    if btn_text in ('publish', 'save', 'simpan', 'terbitkan'):
+                        if btn.is_displayed():
+                            btn.click()
+                            published = True
+                            break
             except Exception:
                 pass
         
