@@ -3,6 +3,11 @@ modules/pinterest.py
 =====================
 Fungsi-fungsi interaksi dengan Pinterest via Selenium WebDriver.
 Menangani login, logout, cek sesi, upload pin, dan retry mechanism.
+
+Optimasi kecepatan:
+- _fast_fill(): inject value via JavaScript (instan, tanpa ngetik per karakter)
+- _find_element_fast(): cari elemen tanpa WebDriverWait (lebih cepat untuk elemen yang sudah ada)
+- upload_pin(): delay minimal, event-driven wait (tunggu elemen muncul, bukan sleep)
 """
 
 import os
@@ -25,10 +30,10 @@ from modules.logger import print_success, print_error, print_warning, print_info
 
 
 # URL Pinterest
-PINTEREST_HOME = "https://www.pinterest.com/"
-PINTEREST_LOGIN = "https://www.pinterest.com/login/"
-PINTEREST_CREATE_PIN = "https://www.pinterest.com/pin-creation-tool/"
-PINTEREST_LOGOUT = "https://www.pinterest.com/logout/"
+PINTEREST_HOME = "https://id.pinterest.com/"
+PINTEREST_LOGIN = "https://id.pinterest.com/login/"
+PINTEREST_CREATE_PIN = "https://id.pinterest.com/pin-creation-tool/"
+PINTEREST_LOGOUT = "https://id.pinterest.com/logout/"
 
 
 def is_logged_in(driver) -> bool:
@@ -228,9 +233,118 @@ def logout(driver) -> bool:
         return False
 
 
+# ============================================================
+# SPEED-OPTIMIZED HELPERS
+# ============================================================
+
+def _fast_fill(driver, element, text: str) -> None:
+    """
+    Isi field input secara instan via JavaScript.
+    
+    Menggunakan nativeInputValueSetter untuk memicu React/Vue state update.
+    Untuk contenteditable div, gunakan innerText + dispatch event.
+    Fallback ke send_keys jika JS gagal.
+    
+    Args:
+        driver: Instance Chrome WebDriver
+        element: Selenium WebElement yang akan diisi
+        text: Teks yang akan dimasukkan
+    """
+    tag_name = element.tag_name.lower()
+    
+    if tag_name in ("input", "textarea"):
+        # Gunakan nativeInputValueSetter agar React/Vue mendeteksi perubahan
+        js_code = """
+        var el = arguments[0];
+        var val = arguments[1];
+        var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'value') ||
+            Object.getOwnPropertyDescriptor(
+            window.HTMLTextAreaElement.prototype, 'value');
+        if (nativeInputValueSetter) {
+            nativeInputValueSetter.set.call(el, val);
+        } else {
+            el.value = val;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        """
+        try:
+            driver.execute_script(js_code, element, text)
+            return
+        except WebDriverException:
+            pass
+    
+    elif tag_name == "div":
+        # Contenteditable div — set innerText lalu dispatch input event
+        js_code = """
+        var el = arguments[0];
+        var val = arguments[1];
+        el.innerText = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        """
+        try:
+            driver.execute_script(js_code, element, text)
+            return
+        except WebDriverException:
+            pass
+    
+    # Fallback: traditional clear + send_keys
+    try:
+        element.clear()
+    except Exception:
+        pass
+    element.send_keys(text)
+
+
+def _find_element_fast(driver, selectors: list[str], 
+                        xpath: str | None = None):
+    """
+    Cari elemen dari list selector tanpa WebDriverWait (lebih cepat).
+    
+    Loop setiap selector, cek is_displayed(), return elemen pertama 
+    yang ditemukan dan visible. Tidak menggunakan WebDriverWait 
+    sehingga lebih cepat untuk elemen yang sudah ada di DOM.
+    
+    Args:
+        driver: Instance Chrome WebDriver
+        selectors: List CSS selector untuk dicari
+        xpath: XPath fallback (opsional)
+    
+    Returns:
+        WebElement yang ditemukan dan visible, atau None
+    """
+    for selector in selectors:
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, selector)
+            if el and el.is_displayed():
+                return el
+        except (NoSuchElementException, WebDriverException):
+            continue
+    
+    # Fallback ke XPath jika disediakan
+    if xpath:
+        try:
+            el = driver.find_element(By.XPATH, xpath)
+            if el and el.is_displayed():
+                return el
+        except (NoSuchElementException, WebDriverException):
+            pass
+    
+    return None
+
+
+# ============================================================
+# BOARD SELECTION (OPTIMIZED)
+# ============================================================
+
 def _select_board(driver, board_name: str) -> bool:
     """
     Pilih board untuk pin yang akan diupload.
+    
+    Delay dioptimasi: menggunakan time.sleep() pendek sebagai pengganti
+    short_delay() yang lebih lambat.
     
     Args:
         driver: Instance Chrome WebDriver
@@ -259,7 +373,7 @@ def _select_board(driver, board_name: str) -> bool:
                 )
                 if board_btn:
                     board_btn.click()
-                    short_delay(1.5, 2.5)
+                    time.sleep(0.5)
                     break
             except (TimeoutException, NoSuchElementException):
                 continue
@@ -271,7 +385,7 @@ def _select_board(driver, board_name: str) -> bool:
                     '//button[contains(text(), "Choose a board")] | //button[contains(text(), "board")] | //div[@role="button"][contains(text(), "board")]')
                 if board_elements:
                     board_elements[0].click()
-                    short_delay(1.5, 2.5)
+                    time.sleep(0.5)
             except Exception:
                 pass
         
@@ -280,6 +394,7 @@ def _select_board(driver, board_name: str) -> bool:
             'input[data-test-id="board-search-input"]',
             'input[placeholder*="Search"]',
             'input[placeholder*="search"]',
+            'input[placeholder*="Cari"]',
             'input[aria-label*="Search"]',
             'input[id="pickerSearchField"]',
         ]
@@ -295,8 +410,9 @@ def _select_board(driver, board_name: str) -> bool:
         
         if search_field:
             search_field.clear()
-            human_type(search_field, board_name)
-            short_delay(2.0, 3.0)
+            # Gunakan send_keys langsung (bukan human_type) untuk kecepatan
+            search_field.send_keys(board_name)
+            time.sleep(0.8)
         
         # Klik board yang sesuai dari hasil pencarian
         try:
@@ -309,13 +425,13 @@ def _select_board(driver, board_name: str) -> bool:
                     try:
                         if option.is_displayed():
                             option.click()
-                            short_delay(1.0, 2.0)
+                            time.sleep(0.4)
                             return True
                     except (ElementNotInteractableException, WebDriverException):
                         continue
             
             # Fallback: klik opsi pertama yang muncul
-            short_delay(1.0, 1.5)
+            time.sleep(0.3)
             first_option_selectors = [
                 'div[data-test-id="boardWithoutSection"]',
                 'div[role="option"]',
@@ -326,7 +442,7 @@ def _select_board(driver, board_name: str) -> bool:
                     options = driver.find_elements(By.CSS_SELECTOR, selector)
                     if options:
                         options[0].click()
-                        short_delay(1.0, 2.0)
+                        time.sleep(0.4)
                         return True
                 except (NoSuchElementException, ElementNotInteractableException):
                     continue
@@ -341,18 +457,28 @@ def _select_board(driver, board_name: str) -> bool:
         return False
 
 
+# ============================================================
+# UPLOAD PIN (SPEED-OPTIMIZED)
+# ============================================================
+
 def upload_pin(driver, image_path: str, title: str, 
                description: str, board_name: str,
                link_url: str = "") -> bool:
     """
-    Upload satu pin ke Pinterest.
+    Upload satu pin ke Pinterest dengan kecepatan optimal.
+    
+    Menggunakan _fast_fill() (JavaScript inject) untuk mengisi field
+    secara instan, dan event-driven wait (tunggu elemen muncul)
+    sebagai pengganti sleep statis.
+    
+    Estimasi waktu: ~15-20 detik per pin (dari ~15 menit sebelumnya).
     
     Langkah:
     1. Buka halaman pin creation tool
     2. Upload gambar
-    3. Isi judul
-    4. Isi deskripsi
-    5. Isi destination link (jika ada)
+    3. Isi judul (_fast_fill)
+    4. Isi deskripsi (_fast_fill)
+    5. Isi destination link (_fast_fill, jika ada)
     6. Pilih board
     7. Publish pin
     
@@ -368,14 +494,22 @@ def upload_pin(driver, image_path: str, title: str,
         True jika upload berhasil, False jika gagal
     """
     try:
-        # Navigasi ke halaman create pin
+        # === Step 1: Buka halaman create pin ===
         driver.get(PINTEREST_CREATE_PIN)
-        short_delay(3.0, 5.0)
         
+        # Tunggu halaman siap — indikator: field judul muncul
         wait = WebDriverWait(driver, 20)
+        try:
+            wait.until(lambda d: _find_element_fast(d, [
+                'input[data-test-id="pin-draft-title"]',
+                'input[placeholder="Tambahkan judul"]',
+                'input[placeholder="Add a title"]',
+                'input[type="file"]',
+            ]))
+        except TimeoutException:
+            time.sleep(3)
         
-        # Step 1: Upload gambar
-        # Cari input file (biasanya hidden)
+        # === Step 2: Upload gambar ===
         file_input = None
         file_input_selectors = [
             'input[type="file"]',
@@ -399,166 +533,102 @@ def upload_pin(driver, image_path: str, title: str,
         # Kirim path gambar ke input file
         absolute_path = os.path.abspath(image_path)
         file_input.send_keys(absolute_path)
-        short_delay(4.0, 6.0)
         
-        # Tunggu gambar selesai diupload
+        # Tunggu gambar terupload — indikator: field judul bisa diisi
+        wait30 = WebDriverWait(driver, 30)
         try:
-            wait.until(lambda d: d.find_elements(By.CSS_SELECTOR, 
-                'div[data-test-id="pin-draft-image"] img, '
-                'div[data-test-id="uploadedImage"], '
-                'img[data-test-id="pin-draft-image"], '
-                'div[class*="uploaded"]'))
+            wait30.until(lambda d: _find_element_fast(d, [
+                'input[data-test-id="pin-draft-title"]',
+                'input[placeholder="Tambahkan judul"]',
+                'input[placeholder="Add a title"]',
+            ]))
         except TimeoutException:
-            # Mungkin tetap berhasil, lanjutkan
-            short_delay(3.0, 5.0)
+            # Fallback sleep jika field tidak muncul
+            time.sleep(4)
         
-        # Step 2: Isi judul
-        # Selector Indonesia diletakkan terlebih dahulu, lalu English
+        # === Step 3: Isi judul ===
         title_selectors = [
             'input[data-test-id="pin-draft-title"]',
-            'input[id="pin-draft-title"]',
             'input[placeholder="Tambahkan judul"]',
+            'input[placeholder="Add a title"]',
             'input[placeholder*="judul" i]',
             'input[placeholder*="title" i]',
-            'input[placeholder="Add a title"]',
-            'input[name="title"]',
-            'div[data-test-id="pin-draft-title"] input',
-            'textarea[data-test-id="pin-draft-title"]',
         ]
+        title_xpath = (
+            '//input[@placeholder="Tambahkan judul"] | '
+            '//input[@placeholder="Add a title"] | '
+            '//input[contains(@placeholder, "judul")] | '
+            '//input[contains(@placeholder, "title")]'
+        )
         
-        title_field = None
-        for selector in title_selectors:
-            try:
-                el = driver.find_element(By.CSS_SELECTOR, selector)
-                if el and el.is_displayed():
-                    title_field = el
-                    break
-            except NoSuchElementException:
-                continue
-        
-        if not title_field:
-            # Coba dengan XPath (Indonesia + English)
-            try:
-                title_field = driver.find_element(By.XPATH,
-                    '//input[@placeholder="Tambahkan judul"] | '
-                    '//input[@placeholder="Add a title"] | '
-                    '//input[contains(@placeholder, "judul")] | '
-                    '//input[contains(@placeholder, "title")]')
-                if title_field and not title_field.is_displayed():
-                    title_field = None
-            except NoSuchElementException:
-                pass
-        
+        title_field = _find_element_fast(driver, title_selectors, title_xpath)
         if title_field:
-            title_field.clear()
-            short_delay(0.5, 1.0)
-            human_type(title_field, title)
-            short_delay(1.0, 2.0)
+            title_field.click()
+            time.sleep(0.2)
+            _fast_fill(driver, title_field, title)
+            time.sleep(0.3)
         
-        # Step 3: Isi deskripsi
-        # Selector Indonesia diletakkan terlebih dahulu, lalu English
+        # === Step 4: Isi deskripsi ===
         desc_selectors = [
-            'div[data-test-id="pin-draft-description"] .notranslate',
-            'div[data-test-id="pin-draft-description"] [contenteditable="true"]',
-            'div[role="textbox"][data-test-id="pin-draft-description"]',
             'textarea[data-test-id="pin-draft-description"]',
             'textarea[placeholder="Ceritakan lebih banyak"]',
             'textarea[placeholder*="Ceritakan" i]',
-            'div[data-placeholder="Ceritakan lebih banyak"]',
             'textarea[placeholder*="Tell" i]',
-            'textarea[placeholder*="description" i]',
+            'div[data-test-id="pin-draft-description"] [contenteditable="true"]',
+            'div[data-test-id="pin-draft-description"] .notranslate',
+            'div[role="textbox"][data-test-id="pin-draft-description"]',
             'div[class*="Description"] [contenteditable="true"]',
             'div.public-DraftEditor-content',
         ]
+        desc_xpath = (
+            '//textarea[@placeholder="Ceritakan lebih banyak"] | '
+            '//textarea[contains(@placeholder, "Ceritakan")] | '
+            '//textarea[contains(@placeholder, "Tell")] | '
+            '//div[@data-test-id="pin-draft-description"]//div[@contenteditable="true"]'
+        )
         
-        desc_field = None
-        for selector in desc_selectors:
-            try:
-                el = driver.find_element(By.CSS_SELECTOR, selector)
-                if el and el.is_displayed():
-                    desc_field = el
-                    break
-            except NoSuchElementException:
-                continue
-        
-        if not desc_field:
-            # Coba dengan XPath (Indonesia + English)
-            try:
-                desc_field = driver.find_element(By.XPATH,
-                    '//div[@data-test-id="pin-draft-description"]//div[@contenteditable="true"] | '
-                    '//textarea[@placeholder="Ceritakan lebih banyak"] | '
-                    '//textarea[contains(@placeholder, "Ceritakan")] | '
-                    '//textarea[contains(@placeholder, "description")] | '
-                    '//textarea[contains(@placeholder, "Tell")]')
-                if desc_field and not desc_field.is_displayed():
-                    desc_field = None
-            except NoSuchElementException:
-                pass
-        
+        desc_field = _find_element_fast(driver, desc_selectors, desc_xpath)
         if desc_field:
             desc_field.click()
-            short_delay(0.5, 1.0)
-            human_type(desc_field, description)
-            short_delay(1.0, 2.0)
+            time.sleep(0.2)
+            _fast_fill(driver, desc_field, description)
+            time.sleep(0.3)
         
-        # Step 3.5: Isi destination link (jika ada)
-        # Selector Indonesia diletakkan terlebih dahulu, lalu English
+        # === Step 5: Isi tautan/link (jika ada) ===
         if link_url:
             link_selectors = [
                 'input[data-test-id="pin-draft-link"]',
-                'input[id="pin-draft-link"]',
                 'input[placeholder="Tambahkan tautan"]',
+                'input[placeholder="Add a destination link"]',
                 'input[placeholder*="tautan" i]',
+                'input[placeholder*="destination" i]',
                 'input[placeholder*="link" i]',
                 'input[placeholder*="url" i]',
-                'input[placeholder="Add a destination link"]',
-                'input[placeholder*="destination" i]',
-                'input[placeholder*="website" i]',
+                'input[id="pin-draft-link"]',
                 'input[name="link"]',
-                'input[aria-label*="tautan" i]',
-                'input[aria-label*="link" i]',
-                'input[aria-label*="destination" i]',
             ]
+            link_xpath = (
+                '//input[@placeholder="Tambahkan tautan"] | '
+                '//input[contains(@placeholder, "tautan")] | '
+                '//input[contains(@placeholder, "Add a destination link")] | '
+                '//input[contains(@placeholder, "destination")] | '
+                '//input[contains(@placeholder, "link")]'
+            )
             
-            link_field = None
-            for selector in link_selectors:
-                try:
-                    el = driver.find_element(By.CSS_SELECTOR, selector)
-                    if el and el.is_displayed():
-                        link_field = el
-                        break
-                except NoSuchElementException:
-                    continue
-            
-            if not link_field:
-                # Coba XPath (Indonesia + English)
-                try:
-                    link_field = driver.find_element(By.XPATH,
-                        '//input[@placeholder="Tambahkan tautan"] | '
-                        '//input[contains(@placeholder, "tautan")] | '
-                        '//input[contains(@placeholder, "Add a destination link")] | '
-                        '//input[contains(@placeholder, "destination")] | '
-                        '//input[contains(@placeholder, "link")]')
-                    if link_field and not link_field.is_displayed():
-                        link_field = None
-                except NoSuchElementException:
-                    pass
-            
+            link_field = _find_element_fast(driver, link_selectors, link_xpath)
             if link_field:
-                link_field.clear()
-                short_delay(0.5, 1.0)
-                human_type(link_field, link_url)
-                short_delay(1.0, 2.0)
-                print_info(f"   Link: {link_url}")
+                link_field.click()
+                time.sleep(0.2)
+                _fast_fill(driver, link_field, link_url)
+                time.sleep(0.3)
             else:
                 print_warning("Tidak bisa menemukan field Destination Link")
         
-        # Step 4: Pilih board
+        # === Step 6: Pilih board ===
         _select_board(driver, board_name)
-        short_delay(1.0, 2.0)
+        time.sleep(0.3)
         
-        # Step 5: Publish pin
-        # Tambahkan label Indonesia (Simpan, Terbitkan)
+        # === Step 7: Klik tombol Publish/Save ===
         publish_selectors = [
             'button[data-test-id="board-dropdown-save-button"]',
             'button[data-test-id="create-pin-save-button"]',
@@ -569,22 +639,24 @@ def upload_pin(driver, image_path: str, title: str,
             'button[aria-label="Save"]',
         ]
         
+        wait10 = WebDriverWait(driver, 10)
         published = False
+        
         for selector in publish_selectors:
             try:
-                publish_btn = wait.until(
+                publish_btn = wait10.until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
                 )
                 if publish_btn and publish_btn.is_displayed():
                     publish_btn.click()
                     published = True
                     break
-            except (TimeoutException, NoSuchElementException, 
+            except (TimeoutException, NoSuchElementException,
                     ElementNotInteractableException):
                 continue
         
         if not published:
-            # Coba cari tombol Publish / Save / Simpan / Terbitkan dengan teks
+            # Fallback: cari tombol berdasarkan teks
             try:
                 buttons = driver.find_elements(By.TAG_NAME, 'button')
                 for btn in buttons:
@@ -601,10 +673,10 @@ def upload_pin(driver, image_path: str, title: str,
             print_error("Tidak bisa menemukan tombol Publish/Save")
             return False
         
-        # Tunggu konfirmasi upload
-        short_delay(5.0, 8.0)
+        # === Step 8: Tunggu konfirmasi ===
+        time.sleep(3)
         
-        # Verifikasi sukses - cek apakah ada notifikasi sukses
+        # Verifikasi sukses — cek apakah ada toast/notifikasi
         try:
             success_indicators = [
                 'div[data-test-id="toast"]',
@@ -622,11 +694,12 @@ def upload_pin(driver, image_path: str, title: str,
             pass
         
         # Jika tidak ada error yang jelas, anggap berhasil
-        current_url = driver.current_url
-        if "pin-creation-tool" not in current_url or "published" in current_url:
-            return True
-        
-        # Cek apakah masih di halaman yang sama (mungkin berhasil)
+        # Pre-navigate ke halaman create pin untuk upload berikutnya
+        try:
+            driver.get(PINTEREST_CREATE_PIN)
+            time.sleep(1)
+        except Exception:
+            pass
         return True
         
     except Exception as e:

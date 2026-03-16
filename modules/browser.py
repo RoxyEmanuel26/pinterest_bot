@@ -152,35 +152,31 @@ def random_delay(min_seconds: float, max_seconds: float) -> None:
     time.sleep(delay)
 
 
-def human_type(element, text: str, min_delay: float = 0.01,
-               max_delay: float = 0.03) -> None:
+def human_type(element, text: str, min_delay: float = 0.03,
+               max_delay: float = 0.08) -> None:
     """
-    Ketik teks dengan cepat tapi tetap simulasi manusia.
-    Gunakan send_keys langsung untuk teks panjang, karakter per karakter
-    hanya untuk awal agar tidak terdeteksi bot.
+    Ketik teks karakter per karakter dengan kecepatan manusia.
+    
+    Digunakan HANYA untuk login form (anti-bot detection penting).
+    Untuk upload pin, gunakan _fast_fill() di pinterest.py.
+    
+    Args:
+        element: Selenium WebElement tempat mengetik
+        text: Teks yang akan diketik
+        min_delay: Minimum delay per karakter (detik)
+        max_delay: Maximum delay per karakter (detik)
     """
-    # Ketik 3 karakter pertama pelan (anti-bot detection)
-    for char in text[:3]:
+    for char in text:
         element.send_keys(char)
-        time.sleep(random.uniform(0.05, 0.1))
+        time.sleep(random.uniform(min_delay, max_delay))
+
+
+def short_delay(min_s: float = 0.2, max_s: float = 0.5) -> None:
+    """
+    Jeda pendek untuk transisi antar langkah.
     
-    # Sisanya langsung sekaligus (jauh lebih cepat)
-    if len(text) > 3:
-        element.send_keys(text[3:])
-    
-    time.sleep(random.uniform(0.1, 0.2))
-
-
-def short_delay(min_s: float = 0.3, max_s: float = 0.8) -> None:
-    """
-    Jeda pendek yang dioptimasi — lebih cepat dari sebelumnya.
-    """
-    time.sleep(random.uniform(min_s, max_s))
-
-
-
-def short_delay(min_s: float = 0.3, max_s: float = 0.8) -> None:
-    """
-    Jeda pendek yang dioptimasi — lebih cepat dari sebelumnya.
+    Args:
+        min_s: Minimum waktu jeda (detik)
+        max_s: Maximum waktu jeda (detik)
     """
     time.sleep(random.uniform(min_s, max_s))

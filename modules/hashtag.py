@@ -47,6 +47,9 @@ def generate_title(filename: str) -> str:
     # Hapus ekstensi file
     name_without_ext = os.path.splitext(filename)[0]
     
+    # Hapus trailing angka seperti _1, _2, _03 di akhir nama file
+    name_without_ext = re.sub(r'[_\-]\d{1,3}$', '', name_without_ext)
+    
     # Ganti underscore, dash, dan titik dengan spasi
     cleaned = re.sub(r'[_\-\.]+', ' ', name_without_ext)
     
@@ -76,6 +79,9 @@ def generate_hashtags(filename: str, max_count: int = 10) -> list[str]:
     # Hapus ekstensi file
     name_without_ext = os.path.splitext(filename)[0]
     
+    # Hapus trailing angka seperti _1, _2, _03 di akhir nama file
+    name_without_ext = re.sub(r'[_\-]\d{1,3}$', '', name_without_ext)
+    
     # Ganti underscore, dash, dan titik dengan spasi
     cleaned = re.sub(r'[_\-\.]+', ' ', name_without_ext)
     
@@ -85,10 +91,16 @@ def generate_hashtags(filename: str, max_count: int = 10) -> list[str]:
     # Split menjadi kata-kata
     words = cleaned.lower().split()
     
-    # Filter: hapus stopwords dan kata pendek (<3 karakter)
+    # Filter: hapus stopwords, kata pendek, dan kata berbasis angka
     hashtags = []
     seen = set()
     for word in words:
+        # Skip kata yang seluruhnya angka (contoh: "2024", "1130825")
+        if word.isdigit():
+            continue
+        # Skip kata yang mengandung 5+ digit berurutan (contoh: "abc12345", "1130825787705136714")
+        if re.search(r'\d{5,}', word):
+            continue
         if (
             len(word) >= 3
             and word not in STOPWORDS
@@ -170,16 +182,23 @@ def gabungkan_hashtag(hashtag_auto: list[str], hashtag_custom: list[str],
 
 if __name__ == "__main__":
     # Test module
-    test_file = "sunset_beach_bali_golden_hour.jpg"
-    print(f"File    : {test_file}")
-    print(f"Judul   : {generate_title(test_file)}")
+    test_files = [
+        "sunset_beach_bali_golden_hour.jpg",
+        "1130825787705136714_1.jpg",        # semua angka + trailing _1
+        "beautiful_girl_2024_photo_3.png",   # campuran + trailing _3
+        "DSC_00123_edit_final.jpg",          # stopwords
+    ]
     
-    tags_auto = generate_hashtags(test_file, max_count=10)
-    print(f"Auto Hashtag : {tags_auto}")
-    
-    custom = ["#aesthetic", "#viral", "#fyp"]
-    tags_gabungan = gabungkan_hashtag(tags_auto, custom, max_total=10)
-    print(f"Gabungan     : {tags_gabungan}")
-    
-    desc = build_description("Follow untuk konten lebih lanjut!", tags_gabungan)
-    print(f"Deskripsi    : {desc}")
+    for test_file in test_files:
+        print(f"\nFile    : {test_file}")
+        print(f"Judul   : {generate_title(test_file)}")
+        
+        tags_auto = generate_hashtags(test_file, max_count=10)
+        print(f"Auto    : {tags_auto}")
+        
+        custom = ["#aesthetic", "#viral", "#fyp"]
+        tags_gabungan = gabungkan_hashtag(tags_auto, custom, max_total=10)
+        print(f"Gabungan: {tags_gabungan}")
+        
+        desc = build_description("Follow untuk konten!", tags_gabungan)
+        print(f"Desc    : {desc}")
