@@ -64,7 +64,9 @@ class UploadLogger:
             log_path: Path lengkap ke file upload_log.csv
         """
         self.log_path = log_path
+        self._uploaded_set: set[str] = set()  # Cache filename yang sudah sukses
         self._ensure_log_file()
+        self._load_uploaded_cache()
 
     def _ensure_log_file(self):
         """Buat file log baru jika belum ada, dengan header kolom."""
@@ -82,6 +84,20 @@ class UploadLogger:
                     self._migrate_old_log(header)
             except Exception:
                 pass
+
+    def _load_uploaded_cache(self):
+        """
+        Baca CSV sekali dan cache semua filename dengan status 'success'
+        ke dalam set untuk O(1) lookup.
+        """
+        try:
+            with open(self.log_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get("status") == "success":
+                        self._uploaded_set.add(row.get("filename", ""))
+        except (FileNotFoundError, KeyError):
+            pass
 
     def _migrate_old_log(self, old_header: list[str]):
         """
@@ -130,6 +146,7 @@ class UploadLogger:
     def is_uploaded(self, filename: str) -> bool:
         """
         Cek apakah foto sudah pernah diupload dengan status sukses.
+        Menggunakan in-memory set cache — O(1) lookup.
         
         Args:
             filename: Nama file foto (tanpa path)
@@ -137,14 +154,7 @@ class UploadLogger:
         Returns:
             True jika file sudah ada di log dengan status 'success'
         """
-        try:
-            df = pd.read_csv(self.log_path, encoding="utf-8")
-            if df.empty:
-                return False
-            success_files = df[df["status"] == "success"]["filename"].tolist()
-            return filename in success_files
-        except (pd.errors.EmptyDataError, FileNotFoundError, KeyError):
-            return False
+        return filename in self._uploaded_set
 
     def log_upload(self, filename: str, filepath: str, akun: str,
                    board: str, judul: str, hashtag: str, link_url: str,
@@ -177,6 +187,10 @@ class UploadLogger:
                 f"{durasi_upload_detik:.1f}", f"{ukuran_file_kb:.1f}",
                 putaran_ke,
             ])
+
+        # Update cache jika upload sukses
+        if status == "success":
+            self._uploaded_set.add(filename)
 
     def get_account_upload_count(self, email: str) -> int:
         """

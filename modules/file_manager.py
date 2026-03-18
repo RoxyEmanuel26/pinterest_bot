@@ -8,6 +8,7 @@ foto asli → watermark → optimasi → siap upload.
 
 import os
 import glob
+import functools
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -47,9 +48,11 @@ def scan_photos(folder: str) -> list[str]:
     return photos
 
 
+@functools.lru_cache(maxsize=64)
 def _get_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """
     Coba load font Arial, fallback ke font default Pillow jika tidak ada.
+    Hasil di-cache dengan lru_cache untuk menghindari disk I/O berulang.
     
     Args:
         font_size: Ukuran font dalam pixel
@@ -140,72 +143,80 @@ def add_watermark(src_path: str, dst_path: str, text: str = "www.roxy.my.id",
     Returns:
         Path foto yang sudah di-watermark
     """
-    # Buka gambar asli
+    # Buka gambar asli (dengan proper resource management)
     img = Image.open(src_path).convert("RGBA")
-    width, height = img.size
-    
-    # Hitung ukuran font agar teks ≈ 50% lebar gambar
-    target_text_width = int(width * width_ratio)
-    font_size = _calc_font_size_for_width(text, target_text_width)
-    font = _get_font(font_size)
-    
-    # Buat layer transparent untuk watermark
-    watermark_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(watermark_layer)
-    
-    # Dapatkan ukuran teks
-    padding_bottom = 20
-    
     try:
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-    except AttributeError:
-        text_width, text_height = draw.textsize(text, font=font)
-    
-    # Posisi: centered horizontal, dekat bawah
-    x = (width - text_width) // 2
-    y = height - text_height - padding_bottom
-    
-    # Hitung alpha dari opacity
-    alpha = int(255 * opacity)
-    
-    # Gambar shadow/outline hitam (offset 3px untuk ukuran besar)
-    shadow_color = (0, 0, 0, alpha)
-    outline_range = max(2, font_size // 30)  # outline lebih tebal untuk font besar
-    for offset_x in range(-outline_range, outline_range + 1):
-        for offset_y in range(-outline_range, outline_range + 1):
-            if offset_x == 0 and offset_y == 0:
-                continue
-            draw.text((x + offset_x, y + offset_y), text, 
-                     font=font, fill=shadow_color)
-    
-    # Gambar teks utama putih
-    text_color = (255, 255, 255, alpha)
-    draw.text((x, y), text, font=font, fill=text_color)
-    
-    # Gabungkan watermark layer dengan gambar asli
-    watermarked = Image.alpha_composite(img, watermark_layer)
+        width, height = img.size
+        
+        # Hitung ukuran font agar teks ≈ 50% lebar gambar
+        target_text_width = int(width * width_ratio)
+        font_size = _calc_font_size_for_width(text, target_text_width)
+        font = _get_font(font_size)
+        
+        # Buat layer transparent untuk watermark
+        watermark_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(watermark_layer)
+        
+        # Dapatkan ukuran teks
+        padding_bottom = 20
+        
+        try:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        except AttributeError:
+            text_width, text_height = draw.textsize(text, font=font)
+        
+        # Posisi: centered horizontal, dekat bawah
+        x = (width - text_width) // 2
+        y = height - text_height - padding_bottom
+        
+        # Hitung alpha dari opacity (clamp 0.0 - 1.0)
+        opacity = max(0.0, min(1.0, opacity))
+        alpha = int(255 * opacity)
+        
+        # Gambar shadow/outline hitam (offset 3px untuk ukuran besar)
+        shadow_color = (0, 0, 0, alpha)
+        outline_range = max(2, font_size // 30)  # outline lebih tebal untuk font besar
+        for offset_x in range(-outline_range, outline_range + 1):
+            for offset_y in range(-outline_range, outline_range + 1):
+                if offset_x == 0 and offset_y == 0:
+                    continue
+                draw.text((x + offset_x, y + offset_y), text, 
+                         font=font, fill=shadow_color)
+        
+        # Gambar teks utama putih
+        text_color = (255, 255, 255, alpha)
+        draw.text((x, y), text, font=font, fill=text_color)
+        
+        # Gabungkan watermark layer dengan gambar asli
+        watermarked = Image.alpha_composite(img, watermark_layer)
+        watermark_layer.close()
+    finally:
+        img.close()
     
     # Pastikan folder tujuan ada
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
     
     # Simpan - konversi ke RGB jika format tidak mendukung RGBA
-    dst_ext = os.path.splitext(dst_path)[1].lower()
-    if dst_ext in (".jpg", ".jpeg"):
-        watermarked = watermarked.convert("RGB")
-        watermarked.save(dst_path, "JPEG", quality=95)
-    elif dst_ext == ".png":
-        watermarked.save(dst_path, "PNG")
-    elif dst_ext == ".webp":
-        watermarked.save(dst_path, "WEBP", quality=95)
-    elif dst_ext == ".gif":
-        watermarked = watermarked.convert("RGB")
-        watermarked.save(dst_path, "JPEG", quality=95)
-        dst_path = os.path.splitext(dst_path)[0] + ".jpg"
-    else:
-        watermarked = watermarked.convert("RGB")
-        watermarked.save(dst_path, "JPEG", quality=95)
+    try:
+        dst_ext = os.path.splitext(dst_path)[1].lower()
+        if dst_ext in (".jpg", ".jpeg"):
+            watermarked = watermarked.convert("RGB")
+            watermarked.save(dst_path, "JPEG", quality=95)
+        elif dst_ext == ".png":
+            watermarked.save(dst_path, "PNG")
+        elif dst_ext == ".webp":
+            watermarked.save(dst_path, "WEBP", quality=95)
+        elif dst_ext == ".gif":
+            watermarked = watermarked.convert("RGB")
+            watermarked.save(dst_path, "JPEG", quality=95)
+            dst_path = os.path.splitext(dst_path)[0] + ".jpg"
+        else:
+            watermarked = watermarked.convert("RGB")
+            watermarked.save(dst_path, "JPEG", quality=95)
+    finally:
+        watermarked.close()
     
     return dst_path
 
@@ -227,47 +238,52 @@ def optimize_image(src_path: str, dst_path: str,
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
     
     img = Image.open(src_path)
-    src_ext = os.path.splitext(src_path)[1].lower()
-    
-    # Konversi PNG/WEBP ke JPEG untuk menghemat ukuran
-    if src_ext in (".png", ".webp"):
-        if img.mode in ("RGBA", "P", "LA"):
-            # Buat background putih untuk gambar dengan transparansi
+    try:
+        src_ext = os.path.splitext(src_path)[1].lower()
+        
+        # Konversi PNG/WEBP ke JPEG untuk menghemat ukuran
+        if src_ext in (".png", ".webp"):
+            if img.mode in ("RGBA", "P", "LA"):
+                # Buat background putih untuk gambar dengan transparansi
+                background = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode == "P":
+                    img = img.convert("RGBA")
+                background.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+                img.close()
+                img = background
+            else:
+                img = img.convert("RGB")
+            
+            # Ubah ekstensi tujuan ke .jpg
+            dst_path = os.path.splitext(dst_path)[0] + ".jpg"
+        elif img.mode == "RGBA":
             background = Image.new("RGB", img.size, (255, 255, 255))
-            if img.mode == "P":
-                img = img.convert("RGBA")
-            background.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+            background.paste(img, mask=img.split()[-1])
+            img.close()
             img = background
-        else:
+        elif img.mode != "RGB":
             img = img.convert("RGB")
         
-        # Ubah ekstensi tujuan ke .jpg
-        dst_path = os.path.splitext(dst_path)[0] + ".jpg"
-    elif img.mode == "RGBA":
-        background = Image.new("RGB", img.size, (255, 255, 255))
-        background.paste(img, mask=img.split()[-1])
-        img = background
-    elif img.mode != "RGB":
-        img = img.convert("RGB")
-    
-    # Cek ukuran file sumber
-    file_size_mb = os.path.getsize(src_path) / (1024 * 1024)
-    
-    if file_size_mb > max_size_mb:
-        # Hitung rasio resize
-        ratio = (max_size_mb / file_size_mb) ** 0.5
-        new_width = int(img.width * ratio)
-        new_height = int(img.height * ratio)
-        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-    
-    # Simpan dengan kompresi
-    quality = 85
-    img.save(dst_path, "JPEG", quality=quality, optimize=True)
-    
-    # Jika masih terlalu besar, kurangi quality secara bertahap
-    while os.path.getsize(dst_path) > max_size_mb * 1024 * 1024 and quality > 30:
-        quality -= 10
+        # Cek ukuran file sumber
+        file_size_mb = os.path.getsize(src_path) / (1024 * 1024)
+        
+        if file_size_mb > max_size_mb:
+            # Hitung rasio resize
+            ratio = (max_size_mb / file_size_mb) ** 0.5
+            new_width = int(img.width * ratio)
+            new_height = int(img.height * ratio)
+            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        # Simpan dengan kompresi
+        quality = 85
         img.save(dst_path, "JPEG", quality=quality, optimize=True)
+        
+        # Jika masih terlalu besar, kurangi quality secara bertahap
+        while os.path.getsize(dst_path) > max_size_mb * 1024 * 1024 and quality > 30:
+            quality -= 10
+            img.save(dst_path, "JPEG", quality=quality, optimize=True)
+    finally:
+        img.close()
     
     return dst_path
 

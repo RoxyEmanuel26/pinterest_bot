@@ -9,8 +9,15 @@ Notifikasi bersifat opsional — jika token/URL kosong,
 semua fungsi akan skip secara silent tanpa error.
 """
 
+import html
+
 import requests
 from datetime import datetime, timezone
+
+
+def _esc(text) -> str:
+    """Escape string untuk HTML Telegram agar mencegah injection."""
+    return html.escape(str(text))
 
 
 # ============================================================
@@ -68,7 +75,7 @@ def notify_start(bot_token: str, chat_id: str, total_foto: int,
         f"📅 Waktu: {now}\n"
         f"📸 Total foto: {total_foto}\n"
         f"👤 Total akun: {total_akun}\n"
-        f"▶️ Akun aktif: {akun_pertama}\n\n"
+        f"▶️ Akun aktif: {_esc(akun_pertama)}\n\n"
         "Bot mulai mengupload pin..."
     )
     return send_telegram(bot_token, chat_id, message)
@@ -93,8 +100,8 @@ def notify_switch(bot_token: str, chat_id: str, akun_lama: str,
     message = (
         "🔄 <b>Ganti Akun</b>\n\n"
         f"📅 Waktu: {now}\n"
-        f"❌ Akun selesai: {akun_lama} ({upload_count} pin)\n"
-        f"✅ Akun baru: {akun_baru}\n"
+        f"❌ Akun selesai: {_esc(akun_lama)} ({upload_count} pin)\n"
+        f"✅ Akun baru: {_esc(akun_baru)}\n"
     )
     return send_telegram(bot_token, chat_id, message)
 
@@ -116,11 +123,11 @@ def notify_done(bot_token: str, chat_id: str, total_sukses: int,
         True jika berhasil
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    akun_list = "\n".join([f"  • {a}" for a in akun_digunakan])
+    akun_list = "\n".join([f"  • {_esc(a)}" for a in akun_digunakan])
     message = (
         "✅ <b>Pinterest Bot Selesai</b>\n\n"
         f"📅 Waktu: {now}\n"
-        f"⏱ Durasi: {durasi}\n"
+        f"⏱ Durasi: {_esc(durasi)}\n"
         f"✅ Sukses: {total_sukses} pin\n"
         f"❌ Gagal: {total_gagal} pin\n\n"
         f"👤 Akun yang digunakan:\n{akun_list}"
@@ -143,11 +150,11 @@ def notify_error(bot_token: str, chat_id: str, error_msg: str,
         True jika berhasil
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    akun_info = f"\n👤 Akun: {akun}" if akun else ""
+    akun_info = f"\n👤 Akun: {_esc(akun)}" if akun else ""
     message = (
         "⚠️ <b>Pinterest Bot Error</b>\n\n"
         f"📅 Waktu: {now}{akun_info}\n"
-        f"❗ Error: {error_msg}\n\n"
+        f"❗ Error: {_esc(error_msg)}\n\n"
         "Program membutuhkan perhatian."
     )
     return send_telegram(bot_token, chat_id, message)
@@ -316,12 +323,12 @@ def send_all_notifications(config: dict, event: str, **kwargs) -> None:
         tg_message = (
             f"⚠️ <b>Akun Di-Skip</b>\n\n"
             f"📅 Waktu: {now}\n"
-            f"👤 Akun: {akun_skip}\n"
-            f"❗ Alasan: {alasan}\n"
-            f"➡️ Akun berikutnya: {akun_baru}\n"
+            f"👤 Akun: {_esc(akun_skip)}\n"
+            f"❗ Alasan: {_esc(alasan)}\n"
+            f"➡️ Akun berikutnya: {_esc(akun_baru)}\n"
         )
         if foto_gagal:
-            tg_message += f"📸 Foto gagal: {foto_gagal}\n"
+            tg_message += f"📸 Foto gagal: {_esc(foto_gagal)}\n"
         send_telegram(tg_token, tg_chat_id, tg_message)
         
         # Discord (warna kuning = warning)

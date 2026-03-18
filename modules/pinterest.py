@@ -408,7 +408,8 @@ def _select_board(driver, board_name: str) -> bool:
                 except Exception:
                     continue
 
-        return True
+        print_warning(f"Board '{board_name}' tidak ditemukan di dropdown")
+        return False
     except Exception as e:
         print_warning(f"Error pilih board: {e}")
         return False
@@ -526,6 +527,11 @@ def upload_pin(driver, image_path: str, title: str,
                     try:
                         txt = btn.text.strip().lower()
                         if txt in ('terbitkan', 'publish', 'simpan', 'save'):
+                            # Pastikan tombol aktif (tidak disabled) sebelum klik
+                            if not btn.is_displayed():
+                                continue
+                            if not btn.is_enabled():
+                                continue
                             btn.click()
                             print_info("   ✅ Tombol Terbitkan diklik!")
                             published = True

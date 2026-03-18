@@ -1,4 +1,5 @@
-# Konfigurasi (berisi password & token)
+# Secrets (berisi password & token)
+.env
 config.json
 
 # Session & log files

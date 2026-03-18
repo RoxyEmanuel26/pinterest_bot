@@ -17,7 +17,7 @@ Penggunaan:
     python main.py
 
 Konfigurasi:
-    Edit config.json sebelum menjalankan program.
+    Edit config.json dan .env sebelum menjalankan program.
 """
 
 import os
@@ -27,9 +27,13 @@ import time
 import signal
 from datetime import datetime, timedelta
 
+from dotenv import load_dotenv
+
 from rich.console import Console
 from rich.prompt import Prompt, Confirm
 
+from modules.models import Account, Config, BotState
+from modules.account_manager import AccountManager
 from modules.browser import create_driver, close_driver, random_delay
 from modules.pinterest import is_logged_in, login, logout, upload_pin, upload_with_retry
 from modules.file_manager import scan_photos, prepare_photo
@@ -56,45 +60,34 @@ ERROR_LOG_PATH = os.path.join(BASE_DIR, "error_log.txt")
 # ============================================================
 # GLOBAL STATE (untuk signal handler)
 # ============================================================
-_bot_state = {
-    "session": None,
-    "driver": None,
-    "foto_index": 0,
-    "akun_index": 0,
-    "upload_count_per_akun": {},
-    "total_sukses": 0,
-    "total_gagal": 0,
-    "foto_terakhir": "",
-    "status_terakhir": "",
-    "akun_status": {},
-    "putaran_ke": 1,
-    "config": None,
-}
+_bot_state = BotState()
+_session: SessionState | None = None
+_driver = None
+_config: Config | None = None
 
 
 def _save_state_now():
-    session = _bot_state["session"]
-    if session:
-        session.save(
-            foto_index=_bot_state["foto_index"],
-            akun_index=_bot_state["akun_index"],
-            upload_count_per_akun=_bot_state["upload_count_per_akun"],
-            total_sukses=_bot_state["total_sukses"],
-            total_gagal=_bot_state["total_gagal"],
-            foto_terakhir=_bot_state["foto_terakhir"],
-            status_terakhir=_bot_state["status_terakhir"],
-            akun_status=_bot_state["akun_status"],
-            putaran_ke=_bot_state["putaran_ke"],
+    if _session:
+        _session.save(
+            foto_index=_bot_state.foto_index,
+            akun_index=_bot_state.akun_index,
+            upload_count_per_akun=_bot_state.upload_count_per_akun,
+            total_sukses=_bot_state.total_sukses,
+            total_gagal=_bot_state.total_gagal,
+            foto_terakhir=_bot_state.foto_terakhir,
+            status_terakhir=_bot_state.status_terakhir,
+            akun_status=_bot_state.akun_status,
+            putaran_ke=_bot_state.putaran_ke,
         )
 
 
 def _signal_handler(signum, frame):
     print_warning("\n⚠️ Program dihentikan. Progress tersimpan di session_state.json")
     _save_state_now()
-    driver = _bot_state.get("driver")
-    if driver:
+    global _driver
+    if _driver:
         try:
-            close_driver(driver)
+            close_driver(_driver)
         except Exception:
             pass
     sys.exit(0)
@@ -108,7 +101,8 @@ signal.signal(signal.SIGTERM, _signal_handler)
 # CONFIG
 # ============================================================
 
-def load_config(config_path: str) -> dict:
+def load_config(config_path: str) -> Config:
+    """Baca dan validasi config.json, kembalikan Config dataclass."""
     if not os.path.exists(config_path):
         print_error(f"File config tidak ditemukan: {config_path}")
         print_info("Buat file config.json terlebih dahulu. Lihat README.md untuk template.")
@@ -116,42 +110,44 @@ def load_config(config_path: str) -> dict:
 
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
+            raw = json.load(f)
     except json.JSONDecodeError as e:
         print_error(f"Format config.json tidak valid: {e}")
         sys.exit(1)
 
     required_fields = ["foto_folder", "accounts"]
     for field in required_fields:
-        if field not in config:
+        if field not in raw:
             print_error(f"Field '{field}' wajib ada di config.json")
             sys.exit(1)
 
-    if not config["accounts"]:
+    if not raw["accounts"]:
         print_error("Minimal 1 akun harus dikonfigurasi di config.json")
         sys.exit(1)
 
-    # Default global
-    config.setdefault("max_upload_per_akun", 50)
-    config.setdefault("delay_min", 1)
-    config.setdefault("delay_max", 3)
-    config.setdefault("headless_mode", False)
-    config.setdefault("max_hashtag", 10)
-    config.setdefault("deskripsi_mode", "auto")
-    config.setdefault("watermark_text", "www.roxy.my.id")
-    config.setdefault("watermark_opacity", 0.8)
-    config.setdefault("telegram_bot_token", "")
-    config.setdefault("telegram_chat_id", "")
-    config.setdefault("discord_webhook_url", "")
+    return Config.from_dict(raw)
 
-    # Default per akun
-    for acc in config["accounts"]:
-        acc.setdefault("judul_template", "")
-        acc.setdefault("hashtag_custom", [])
-        acc.setdefault("link_url", "")
-        acc.setdefault("deskripsi_template", "")
 
-    return config
+def inject_secrets_from_env(config: Config) -> None:
+    """
+    Inject kredensial dari environment variables (.env) ke Config.
+
+    Environment variables yang dibaca:
+    - ACCOUNT_<N>_PASSWORD  → config.accounts[N-1].password
+    - TELEGRAM_BOT_TOKEN    → config.telegram_bot_token
+    - TELEGRAM_CHAT_ID      → config.telegram_chat_id
+    - DISCORD_WEBHOOK_URL   → config.discord_webhook_url
+    """
+    for i, acc in enumerate(config.accounts, start=1):
+        env_key = f"ACCOUNT_{i}_PASSWORD"
+        password = os.environ.get(env_key, "")
+        if not password:
+            print_warning(f"Environment variable {env_key} tidak ditemukan atau kosong!")
+        acc.password = password
+
+    config.telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    config.telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    config.discord_webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 
 # ============================================================
@@ -169,8 +165,9 @@ def get_pending_photos(foto_folder: str, logger: UploadLogger) -> list[str]:
 
 
 def preprocess_photos(pending_photos: list[str], foto_folder: str,
-                      config: dict) -> dict[str, str]:
+                      config: Config) -> dict[str, str]:
     processed_map = {}
+    config_dict = config.to_dict()
     progress = create_progress_bar()
     with progress:
         task = progress.add_task(
@@ -179,7 +176,7 @@ def preprocess_photos(pending_photos: list[str], foto_folder: str,
         )
         for photo_path in pending_photos:
             try:
-                processed_path = prepare_photo(photo_path, foto_folder, config)
+                processed_path = prepare_photo(photo_path, foto_folder, config_dict)
                 processed_map[photo_path] = processed_path
                 progress.update(task, advance=1)
             except Exception as e:
@@ -191,84 +188,23 @@ def preprocess_photos(pending_photos: list[str], foto_folder: str,
 
 
 # ============================================================
-# ACCOUNT STATUS HELPERS
+# SPLIT FUNCTIONS
 # ============================================================
 
-def find_next_active_account(accounts: list[dict], akun_status: dict[str, str],
-                              start_idx: int = 0) -> int:
-    for idx in range(start_idx, len(accounts)):
-        email = accounts[idx]["email"]
-        if akun_status.get(email, "active") == "active":
-            return idx
-    return -1
+def _initialize_session(config: Config, logger: UploadLogger,
+                        session: SessionState, acct_mgr: AccountManager
+                        ) -> tuple[list[str], dict[str, str], int, int, str | None]:
+    """
+    STEP 1-6: Load config, scan foto, preprocess, session resume, konfirmasi user.
 
-
-def all_accounts_inactive(akun_status: dict[str, str]) -> bool:
-    return all(s != "active" for s in akun_status.values())
-
-
-def skip_account(akun_email: str, alasan: str, akun_status: dict,
-                 accounts: list[dict], config: dict,
-                 foto_gagal: str = "") -> int:
-    akun_status[akun_email] = alasan
-
-    current_idx = next(i for i, a in enumerate(accounts) if a["email"] == akun_email)
-    next_idx = find_next_active_account(accounts, akun_status, current_idx + 1)
-    if next_idx == -1:
-        next_idx = find_next_active_account(accounts, akun_status, 0)
-
-    next_email = accounts[next_idx]["email"] if next_idx != -1 else "tidak ada"
-
-    print_warning(f"Akun {akun_email} di-skip [alasan: {alasan}]")
-    if next_idx != -1:
-        print_info(f"   Lanjut ke akun berikutnya: {next_email}")
-
-    send_all_notifications(config, "skip",
-        akun_skip=akun_email,
-        alasan=alasan,
-        akun_baru=next_email,
-        foto_gagal=foto_gagal,
-    )
-    return next_idx
-
-
-# ============================================================
-# MAIN BOT FUNCTION
-# ============================================================
-
-def run_bot():
-    global _bot_state
-    start_time = datetime.now()
-
-    # ===== STEP 1: Baca Config =====
-    print_info("Membaca konfigurasi...")
-    config = load_config(CONFIG_PATH)
-    _bot_state["config"] = config
-
-    foto_folder        = config["foto_folder"]
-    max_upload         = config["max_upload_per_akun"]
-    delay_min          = config["delay_min"]
-    delay_max          = config["delay_max"]
-    headless           = config["headless_mode"]
-    max_hashtag        = config["max_hashtag"]
-    deskripsi_mode     = config.get("deskripsi_mode", "auto")
-    accounts           = config["accounts"]
-
-    logger  = UploadLogger(LOG_PATH)
-    session = SessionState(SESSION_STATE_PATH)
-    _bot_state["session"] = session
-
-    akun_status = {acc["email"]: "active" for acc in accounts}
-    _bot_state["akun_status"] = akun_status
-
-    consecutive_fails = {acc["email"]: 0 for acc in accounts}
-
-    # ===== STEP 2: Cek Session Sebelumnya =====
+    Returns:
+        (pending_photos, processed_map, resume_foto_index, putaran_ke, manual_description)
+    """
     resume_from_session = False
-    resume_foto_index   = 0
-    resume_akun_index   = 0
-    putaran_ke          = 1
+    resume_foto_index = 0
+    putaran_ke = 1
 
+    # --- Cek session sebelumnya ---
     if session.exists():
         prev_state = session.load()
         if prev_state:
@@ -276,28 +212,21 @@ def run_bot():
             lanjutkan = Confirm.ask("  🔄 Lanjutkan sesi sebelumnya?", default=True)
             if lanjutkan:
                 resume_from_session = True
-                resume_foto_index   = prev_state.get("foto_index", 0)
-                resume_akun_index   = prev_state.get("akun_index", 0)
-                putaran_ke          = prev_state.get("putaran_ke", 1)
-                _bot_state["total_sukses"] = prev_state.get("total_sukses", 0)
-                _bot_state["total_gagal"]  = prev_state.get("total_gagal", 0)
-                _bot_state["putaran_ke"]   = putaran_ke
-                for email, status in prev_state.get("akun_status", {}).items():
-                    if email in akun_status:
-                        # Reset limit_reached → active (sesi baru, counter baru)
-                        if status == "limit_reached":
-                            akun_status[email] = "active"
-                        else:
-                            akun_status[email] = status
+                resume_foto_index = prev_state.get("foto_index", 0)
+                putaran_ke = prev_state.get("putaran_ke", 1)
+                _bot_state.total_sukses = prev_state.get("total_sukses", 0)
+                _bot_state.total_gagal = prev_state.get("total_gagal", 0)
+                _bot_state.putaran_ke = putaran_ke
+                acct_mgr.restore_status(prev_state.get("akun_status", {}))
                 print_success(f"Melanjutkan dari foto ke-{resume_foto_index + 1}")
             else:
                 session.delete()
                 print_info("Session dihapus. Memulai dari awal.")
 
-    # ===== STEP 3: Scan Foto =====
-    print_info(f"Memindai folder foto: {foto_folder}")
+    # --- Scan foto ---
+    print_info(f"Memindai folder foto: {config.foto_folder}")
     try:
-        pending_photos = get_pending_photos(foto_folder, logger)
+        pending_photos = get_pending_photos(config.foto_folder, logger)
     except FileNotFoundError as e:
         print_error(str(e))
         sys.exit(1)
@@ -319,412 +248,291 @@ def run_bot():
             session.delete()
             sys.exit(0)
 
-    # ===== STEP 4: Watermark + Optimasi =====
+    # --- Watermark + Optimasi ---
     print_info("Memproses foto (watermark + optimasi)...")
-    processed_map = preprocess_photos(pending_photos, foto_folder, config)
+    processed_map = preprocess_photos(pending_photos, config.foto_folder, config)
 
-    # ===== STEP 5: Tampilkan Info Awal =====
-    avg_delay       = (delay_min + delay_max) / 2
-    estimasi_menit  = (len(pending_photos) * avg_delay) / 60
-    estimasi_str    = f"{estimasi_menit:.1f} menit"
+    # --- Tampilkan info awal ---
+    avg_delay = (config.delay_min + config.delay_max) / 2
+    estimasi_menit = (len(pending_photos) * avg_delay) / 60
 
+    accounts_dicts = [a.to_dict() for a in config.accounts]
     display_initial_info(
         total_foto=len(pending_photos),
-        total_akun=len(accounts),
-        accounts=accounts,
+        total_akun=len(config.accounts),
+        accounts=accounts_dicts,
         estimasi_menit=estimasi_menit,
     )
 
-    # ===== STEP 6: Konfirmasi User =====
+    # --- Konfirmasi user ---
     if not Confirm.ask("  🚀 Mulai upload?", default=True):
         print_info("Upload dibatalkan oleh user.")
         sys.exit(0)
 
     manual_description = None
-    if deskripsi_mode == "manual":
+    if config.deskripsi_mode == "manual":
         manual_description = Prompt.ask("  ✏️  Masukkan deskripsi untuk semua pin")
 
-    # ===== STEP 7: Mulai Upload =====
-    console.print()
-    print_info("Memulai proses upload...")
+    return pending_photos, processed_map, resume_foto_index, putaran_ke, manual_description
 
-    send_all_notifications(config, "start",
-        total_foto=len(pending_photos),
-        total_akun=len(accounts),
-        akun_pertama=accounts[0]["email"],
-        foto_folder=foto_folder,
-        estimasi=estimasi_str,
-    )
 
-    current_account_idx = resume_akun_index if resume_from_session else 0
-    total_sukses        = _bot_state["total_sukses"]
-    total_gagal         = _bot_state["total_gagal"]
-    driver              = None
-    akun_digunakan      = set()
-    akun_diskip         = []
-    session_upload_count = {acc["email"]: 0 for acc in accounts}
+def _ensure_driver_and_login(
+    driver, account: Account, headless: bool,
+    acct_mgr: AccountManager, filename: str,
+    remaining: int
+) -> tuple:
+    """
+    Pastikan Chrome driver aktif dan akun sudah login.
 
-    active_idx = find_next_active_account(accounts, akun_status, current_account_idx)
-    if active_idx == -1:
-        active_idx = find_next_active_account(accounts, akun_status, 0)
+    Returns:
+        (driver, login_ok: bool, should_skip_idx: int)
+        - should_skip_idx >= 0 berarti harus pindah ke akun tersebut
+        - should_skip_idx == -1 berarti semua akun habis
+        - should_skip_idx == None berarti OK, lanjut upload
+    """
+    global _driver
 
-    if active_idx == -1:
-        print_warning("Semua akun sudah di-skip atau mencapai batas!")
-        display_all_accounts_down(akun_status, len(pending_photos))
-        send_all_notifications(config, "error",
-            error_msg="Semua akun tidak aktif saat program dimulai")
-        sys.exit(0)
-
-    current_account_idx  = active_idx
-    foto_global_index    = resume_foto_index if resume_from_session else 0
-
-    try:
-        progress = create_progress_bar()
-        with progress:
-            upload_task = progress.add_task(
-                "📤 Uploading pins...",
-                total=len(pending_photos)
+    if driver is None:
+        # --- Buka driver baru ---
+        chrome_profile = account.chrome_profile_path
+        print_info(f"Membuka Chrome dengan profil: {chrome_profile}")
+        try:
+            driver = create_driver(
+                chrome_profile_path=chrome_profile,
+                headless=headless,
             )
+            _driver = driver
+        except Exception as e:
+            print_error(f"Gagal membuat Chrome driver: {e}")
+            write_error_log(ERROR_LOG_PATH, account.email, filename,
+                            f"Chrome driver error: {e}")
+            return None, False, -2  # Fatal error
 
-            for i, photo_path in enumerate(pending_photos):
-                filename       = os.path.basename(photo_path)
-                processed_path = processed_map.get(photo_path, photo_path)
+        # --- Login setelah driver baru ---
+        if not is_logged_in(driver):
+            print_info(f"Login ke akun: {account.email}")
+            login_success = _login_with_retry(driver, account)
+            if not login_success:
+                print_error(f"Login gagal untuk {account.email}")
+                close_driver(driver)
+                _driver = None
+                next_idx = acct_mgr.skip(account.email, "banned", foto_gagal=filename)
+                if next_idx == -1:
+                    display_all_accounts_down(acct_mgr.status, remaining)
+                return None, False, next_idx
 
-                _bot_state["foto_index"]    = foto_global_index + i
-                _bot_state["foto_terakhir"] = filename
+    else:
+        # --- Cek sesi masih aktif ---
+        if not is_logged_in(driver):
+            print_warning(f"Sesi expired untuk {account.email}, re-login...")
+            login_success = _login_with_retry(driver, account)
+            if not login_success:
+                print_error(f"Re-login 2x gagal untuk {account.email}, tandai banned")
+                write_error_log(ERROR_LOG_PATH, account.email, filename,
+                                "Re-login 2x gagal, akun ditandai banned")
+                close_driver(driver)
+                _driver = None
+                next_idx = acct_mgr.skip(account.email, "banned", foto_gagal=filename)
+                if next_idx == -1:
+                    display_all_accounts_down(acct_mgr.status, remaining)
+                return None, False, next_idx
 
-                # ----- 7a: Cek semua akun non-active -----
-                if all_accounts_inactive(akun_status):
-                    # Cek apakah ada akun yang hanya limit_reached (bukan banned/error)
-                    limit_only = [e for e, s in akun_status.items() if s == "limit_reached"]
-                    if limit_only:
-                        # Mulai putaran baru!
-                        putaran_ke += 1
-                        _bot_state["putaran_ke"] = putaran_ke
-                        print_info(f"🔄 Semua akun selesai! Memulai putaran ke-{putaran_ke}...")
-                        for email in limit_only:
-                            akun_status[email] = "active"
-                            session_upload_count[email] = 0
-                        current_account_idx = find_next_active_account(accounts, akun_status, 0)
-                        if current_account_idx == -1:
-                            break
-                        # Logout akun lama agar bisa login ulang dari akun pertama
-                        if driver:
-                            try:
-                                logout(driver)
-                            except Exception:
-                                pass
-                            time.sleep(1)
-                            login_success = login(driver, accounts[current_account_idx]["email"],
-                                                  accounts[current_account_idx]["password"])
-                            if not login_success:
-                                time.sleep(3)
-                                login_success = login(driver, accounts[current_account_idx]["email"],
-                                                      accounts[current_account_idx]["password"])
-                    else:
-                        sisa = len(pending_photos) - i
-                        display_all_accounts_down(akun_status, sisa)
-                        send_all_notifications(config, "error",
-                            error_msg="Semua akun tidak dapat digunakan, program berhenti",
-                            akun="semua akun non-aktif")
-                        break
+    return driver, True, None  # OK
 
-                # ----- 7b: Cek batas upload akun aktif -----
-                current_account   = accounts[current_account_idx]
-                akun_email        = current_account["email"]
-                akun_upload_count = session_upload_count.get(akun_email, 0)
 
-                if akun_status.get(akun_email) != "active":
-                    next_idx = find_next_active_account(accounts, akun_status, 0)
-                    if next_idx == -1:
-                        display_all_accounts_down(akun_status, len(pending_photos) - i)
-                        break
-                    current_account_idx = next_idx
-                    current_account     = accounts[current_account_idx]
-                    akun_email          = current_account["email"]
-                    akun_upload_count   = session_upload_count.get(akun_email, 0)
+def _login_with_retry(driver, account: Account, max_retries: int = 2) -> bool:
+    """Login dengan retry otomatis."""
+    for attempt in range(max_retries):
+        success = login(driver, account.email, account.password)
+        if success:
+            return True
+        if attempt < max_retries - 1:
+            print_warning("Login gagal, mencoba ulang...")
+            time.sleep(3)
+    return False
 
-                if akun_upload_count >= max_upload:
-                    prev_profile = current_account.get("chrome_profile_path", "")
-                    next_idx = skip_account(
-                        akun_email, "limit_reached", akun_status,
-                        accounts, config, foto_gagal=filename
-                    )
-                    if next_idx == -1:
-                        display_all_accounts_down(akun_status, len(pending_photos) - i)
-                        break
-                    current_account_idx = next_idx
-                    current_account     = accounts[current_account_idx]
-                    akun_email          = current_account["email"]
-                    new_profile = current_account.get("chrome_profile_path", "")
 
-                    if driver and prev_profile == new_profile:
-                        # Profile SAMA → logout lalu login akun baru tanpa tutup Chrome
-                        print_info(f"Logout & login ke akun baru: {akun_email}")
-                        try:
-                            logout(driver)
-                        except Exception:
-                            pass
-                        time.sleep(1)
-                        login_success = login(driver, current_account["email"],
-                                             current_account["password"])
-                        if not login_success:
-                            print_warning("Login gagal, mencoba ulang...")
-                            time.sleep(3)
-                            login_success = login(driver, current_account["email"],
-                                                  current_account["password"])
-                        if not login_success:
-                            print_error(f"Login gagal untuk {akun_email}, skip akun")
-                            write_error_log(ERROR_LOG_PATH, akun_email, filename,
-                                            "Login gagal 2x")
-                            next_idx = skip_account(
-                                akun_email, "banned", akun_status,
-                                accounts, config, foto_gagal=filename
-                            )
-                            if next_idx == -1:
-                                display_all_accounts_down(akun_status, len(pending_photos) - i)
-                                break
-                            current_account_idx = next_idx
-                            continue
-                    elif driver:
-                        # Profile BEDA → tutup Chrome lama, buka baru
-                        close_driver(driver)
-                        driver = None
-                        _bot_state["driver"] = None
+def _handle_account_rotation(
+    driver, i: int, filename: str, acct_mgr: AccountManager,
+    config: Config, current_account_idx: int,
+    pending_photos: list[str]
+) -> tuple:
+    """
+    Cek batas upload, rotasi akun, dan handle putaran baru.
 
-                akun_digunakan.add(akun_email)
-                _bot_state["akun_index"] = current_account_idx
+    Returns:
+        (driver, current_account_idx, should_break, should_continue)
+    """
+    global _driver
+    accounts = config.accounts
+    remaining = len(pending_photos) - i
 
-                # ----- Buka driver jika belum ada -----
-                if driver is None:
-                    chrome_profile = current_account.get("chrome_profile_path", "")
-                    print_info(f"Membuka Chrome dengan profil: {chrome_profile}")
-                    try:
-                        driver = create_driver(
-                            chrome_profile_path=chrome_profile,
-                            headless=headless,
-                        )
-                        _bot_state["driver"] = driver
-                    except Exception as e:
-                        print_error(f"Gagal membuat Chrome driver: {e}")
-                        write_error_log(ERROR_LOG_PATH, akun_email, filename,
-                                        f"Chrome driver error: {e}")
-                        send_all_notifications(config, "error",
-                            error_msg=f"Gagal membuat Chrome driver: {e}",
-                            akun=akun_email)
-                        break
+    # --- Cek semua akun non-active ---
+    if acct_mgr.all_inactive():
+        if acct_mgr.has_limit_only():
+            # Mulai putaran baru!
+            _bot_state.putaran_ke += 1
+            print_info(f"🔄 Semua akun selesai! Memulai putaran ke-{_bot_state.putaran_ke}...")
+            acct_mgr.reset_limits()
+            current_account_idx = acct_mgr.find_next_active(0)
+            if current_account_idx == -1:
+                return driver, current_account_idx, True, False
 
-                    # Login setelah driver baru dibuka
-                    if not is_logged_in(driver):
-                        print_info(f"Login ke akun: {akun_email}")
-                        login_success = login(driver, current_account["email"],
-                                             current_account["password"])
-                        if not login_success:
-                            time.sleep(3)
-                            login_success = login(driver, current_account["email"],
-                                                  current_account["password"])
-                        if not login_success:
-                            print_error(f"Login gagal untuk {akun_email}")
-                            close_driver(driver)
-                            driver = None
-                            _bot_state["driver"] = None
-                            next_idx = skip_account(
-                                akun_email, "banned", akun_status,
-                                accounts, config, foto_gagal=filename
-                            )
-                            if next_idx == -1:
-                                display_all_accounts_down(akun_status, len(pending_photos) - i)
-                                break
-                            current_account_idx = next_idx
-                            continue
-
-                # ----- 7c: Cek sesi login (untuk driver yang sudah ada) -----
-                elif not is_logged_in(driver):
-                    print_warning(f"Sesi expired untuk {akun_email}, re-login...")
-                    login_success = login(driver, current_account["email"],
-                                         current_account["password"])
-                    if not login_success:
-                        print_warning("Login gagal, mencoba ulang...")
-                        time.sleep(3)
-                        login_success = login(driver, current_account["email"],
-                                              current_account["password"])
-                    if not login_success:
-                        print_error(f"Re-login 2x gagal untuk {akun_email}, tandai banned")
-                        write_error_log(ERROR_LOG_PATH, akun_email, filename,
-                                        "Re-login 2x gagal, akun ditandai banned")
-                        close_driver(driver)
-                        driver = None
-                        _bot_state["driver"] = None
-                        next_idx = skip_account(
-                            akun_email, "banned", akun_status,
-                            accounts, config, foto_gagal=filename
-                        )
-                        if next_idx == -1:
-                            display_all_accounts_down(akun_status, len(pending_photos) - i)
-                            break
-                        current_account_idx = next_idx
-                        continue
-
-                # ----- 7d: Generate judul + deskripsi + hashtag -----
-                judul_template = current_account.get("judul_template", "")
-                title = judul_template if judul_template else generate_title(filename)
-
-                hashtag_auto   = generate_hashtags(filename, max_count=max_hashtag)
-                hashtag_custom = current_account.get("hashtag_custom", [])
-                hashtags       = gabungkan_hashtag(hashtag_auto, hashtag_custom,
-                                                   max_total=max_hashtag)
-                hashtag_str    = " ".join(hashtags)
-
-                if deskripsi_mode == "manual" and manual_description:
-                    description = build_description(manual_description, hashtags)
-                else:
-                    template    = current_account.get("deskripsi_template", "")
-                    description = build_description(template, hashtags)
-
-                link_url = current_account.get("link_url", "")
-
-                # ----- 7e: Upload pin -----
-                print_info(f"📤 Uploading: {filename}")
-                print_info(f"   Judul: {title}")
-                print_info(f"   Board: {current_account['board']}")
-                if link_url:
-                    print_info(f"   Link: {link_url}")
-
-                upload_start = time.time()
-
-                success = upload_with_retry(
-                    driver=driver,
-                    image_path=processed_path,
-                    title=title,
-                    description=description,
-                    board_name=current_account["board"],
-                    link_url=link_url,
-                    max_retries=3,
-                )
-
-                upload_durasi = time.time() - upload_start
-
+            # Logout akun lama agar bisa login ulang dari akun pertama
+            if driver:
                 try:
-                    file_size_kb = os.path.getsize(processed_path) / 1024
-                except OSError:
-                    file_size_kb = 0.0
+                    logout(driver)
+                except Exception:
+                    pass
+                time.sleep(1)
+                _login_with_retry(driver, accounts[current_account_idx])
+        else:
+            display_all_accounts_down(acct_mgr.status, remaining)
+            config_dict = config.to_dict()
+            send_all_notifications(config_dict, "error",
+                error_msg="Semua akun tidak dapat digunakan, program berhenti",
+                akun="semua akun non-aktif")
+            return driver, current_account_idx, True, False
 
-                # ----- 7f: Log -----
-                status       = "success" if success else "failed"
-                alasan_gagal = "" if success else "Upload gagal setelah 3x retry"
+    # --- Cek akun saat ini masih aktif ---
+    account = accounts[current_account_idx]
+    if acct_mgr.status.get(account.email) != "active":
+        next_idx = acct_mgr.find_next_active(0)
+        if next_idx == -1:
+            display_all_accounts_down(acct_mgr.status, remaining)
+            return driver, current_account_idx, True, False
+        current_account_idx = next_idx
+        account = accounts[current_account_idx]
 
-                logger.log_upload(
-                    filename=filename,
-                    filepath=processed_path,
-                    akun=akun_email,
-                    board=current_account["board"],
-                    judul=title,
-                    hashtag=hashtag_str,
-                    link_url=link_url,
-                    status=status,
-                    alasan_gagal=alasan_gagal,
-                    durasi_upload_detik=upload_durasi,
-                    ukuran_file_kb=file_size_kb,
-                    putaran_ke=putaran_ke,
-                )
+    # --- Cek batas upload ---
+    if acct_mgr.get_upload_count(account.email) >= config.max_upload_per_akun:
+        prev_profile = account.chrome_profile_path
+        next_idx = acct_mgr.skip(account.email, "limit_reached", foto_gagal=filename)
+        if next_idx == -1:
+            display_all_accounts_down(acct_mgr.status, remaining)
+            return driver, current_account_idx, True, False
 
-                if success:
-                    total_sukses += 1
-                    session_upload_count[akun_email] = session_upload_count.get(akun_email, 0) + 1
-                    consecutive_fails[akun_email] = 0
-                    print_success(f"Berhasil upload: {filename}")
-                else:
-                    total_gagal += 1
-                    consecutive_fails[akun_email] += 1
-                    print_error(f"Gagal upload: {filename}")
-                    write_error_log(ERROR_LOG_PATH, akun_email, filename, alasan_gagal)
+        current_account_idx = next_idx
+        new_account = accounts[current_account_idx]
+        new_profile = new_account.chrome_profile_path
 
-                    if consecutive_fails[akun_email] >= 3:
-                        print_error(f"Akun {akun_email} gagal 3x berturut-turut!")
-                        close_driver(driver)
-                        driver = None
-                        _bot_state["driver"] = None
-                        next_idx = skip_account(
-                            akun_email, "error", akun_status,
-                            accounts, config, foto_gagal=filename
-                        )
-                        if next_idx == -1:
-                            display_all_accounts_down(akun_status, len(pending_photos) - (i+1))
-                            break
-                        current_account_idx = next_idx
-
-                # ----- 7g: Update state -----
-                _bot_state["total_sukses"]    = total_sukses
-                _bot_state["total_gagal"]     = total_gagal
-                _bot_state["status_terakhir"] = status
-                _bot_state["upload_count_per_akun"][akun_email] = \
-                    session_upload_count.get(akun_email, 0)
-
-                _save_state_now()
-
-                akun_upload_count = session_upload_count.get(akun_email, 0)
-                sisa_foto = len(pending_photos) - (i + 1)
-
-                display_status_table(
-                    akun_aktif=akun_email,
-                    chrome_profile=current_account.get("chrome_profile_path", "N/A"),
-                    upload_ke=akun_upload_count,
-                    max_upload=max_upload,
-                    sisa_foto=sisa_foto,
-                    total_sukses=total_sukses,
-                    total_gagal=total_gagal,
-                )
-
-                progress.update(upload_task, advance=1)
-
-                if total_sukses > 0 and total_sukses % 10 == 0:
-                    send_all_notifications(config, "progress",
-                        akun_aktif=akun_email,
-                        upload_count=akun_upload_count,
-                        max_upload=max_upload,
-                        sisa_foto=sisa_foto,
-                        board=current_account["board"],
-                    )
-
-                if i < len(pending_photos) - 1:
-                    delay = random_delay(delay_min, delay_max)
-
-    except KeyboardInterrupt:
-        print_warning("\n⚠️ Program dihentikan oleh user (Ctrl+C)")
-        _save_state_now()
-
-    except Exception as e:
-        print_error(f"Error tidak terduga: {e}")
-        current_email = ""
-        if current_account_idx < len(accounts):
-            current_email = accounts[current_account_idx]["email"]
-        write_error_log(ERROR_LOG_PATH, current_email,
-                        _bot_state.get("foto_terakhir", ""), str(e))
-        send_all_notifications(config, "error",
-            error_msg=str(e),
-            akun=current_email,
-            foto_terakhir=_bot_state.get("foto_terakhir", ""))
-        _save_state_now()
-
-    finally:
-        if driver:
+        if driver and prev_profile == new_profile:
+            # Profile SAMA → logout lalu login akun baru tanpa tutup Chrome
+            print_info(f"Logout & login ke akun baru: {new_account.email}")
             try:
-                print_info("Logout sebelum menutup browser...")
                 logout(driver)
             except Exception:
                 pass
-            try:
-                close_driver(driver)
-            except Exception:
-                pass
-            _bot_state["driver"] = None
+            time.sleep(1)
+            login_success = _login_with_retry(driver, new_account)
+            if not login_success:
+                print_error(f"Login gagal untuk {new_account.email}, skip akun")
+                write_error_log(ERROR_LOG_PATH, new_account.email, filename,
+                                "Login gagal 2x")
+                next_idx = acct_mgr.skip(new_account.email, "banned", foto_gagal=filename)
+                if next_idx == -1:
+                    display_all_accounts_down(acct_mgr.status, remaining)
+                    return driver, current_account_idx, True, False
+                current_account_idx = next_idx
+                return driver, current_account_idx, False, True
+        elif driver:
+            # Profile BEDA → tutup Chrome lama, buka baru
+            close_driver(driver)
+            driver = None
+            _driver = None
 
-    # ===== STEP 8: Summary =====
-    end_time     = datetime.now()
-    total_secs   = int((end_time - start_time).total_seconds())
-    durasi_str   = f"{total_secs//3600}j {(total_secs%3600)//60}m {total_secs%60}d"
-    foto_sisa    = max(0, total_foto - (total_sukses + total_gagal))
-    akun_diskip  = [e for e, s in akun_status.items() if s != "active"]
+    return driver, current_account_idx, False, False
+
+
+def _upload_single_photo(
+    driver, photo_path: str, processed_path: str,
+    account: Account, config: Config,
+    acct_mgr: AccountManager, logger: UploadLogger,
+    manual_description: str | None,
+) -> tuple[bool, float]:
+    """
+    Generate metadata + upload satu foto + log hasil.
+
+    Returns:
+        (success, durasi_upload)
+    """
+    filename = os.path.basename(photo_path)
+
+    # --- Generate judul + deskripsi + hashtag ---
+    title = account.judul_template if account.judul_template else generate_title(filename)
+
+    hashtag_auto = generate_hashtags(filename, max_count=config.max_hashtag)
+    hashtags = gabungkan_hashtag(hashtag_auto, account.hashtag_custom,
+                                 max_total=config.max_hashtag)
+    hashtag_str = " ".join(hashtags)
+
+    if config.deskripsi_mode == "manual" and manual_description:
+        description = build_description(manual_description, hashtags)
+    else:
+        description = build_description(account.deskripsi_template, hashtags)
+
+    link_url = account.link_url
+
+    # --- Upload pin ---
+    print_info(f"📤 Uploading: {filename}")
+    print_info(f"   Judul: {title}")
+    print_info(f"   Board: {account.board}")
+    if link_url:
+        print_info(f"   Link: {link_url}")
+
+    upload_start = time.time()
+
+    success = upload_with_retry(
+        driver=driver,
+        image_path=processed_path,
+        title=title,
+        description=description,
+        board_name=account.board,
+        link_url=link_url,
+        max_retries=3,
+    )
+
+    upload_durasi = time.time() - upload_start
+
+    try:
+        file_size_kb = os.path.getsize(processed_path) / 1024
+    except OSError:
+        file_size_kb = 0.0
+
+    # --- Log ---
+    status = "success" if success else "failed"
+    alasan_gagal = "" if success else "Upload gagal setelah 3x retry"
+
+    logger.log_upload(
+        filename=filename,
+        filepath=processed_path,
+        akun=account.email,
+        board=account.board,
+        judul=title,
+        hashtag=hashtag_str,
+        link_url=link_url,
+        status=status,
+        alasan_gagal=alasan_gagal,
+        durasi_upload_detik=upload_durasi,
+        ukuran_file_kb=file_size_kb,
+        putaran_ke=_bot_state.putaran_ke,
+    )
+
+    return success, upload_durasi
+
+
+def _generate_summary(
+    start_time: datetime, total_foto: int,
+    total_sukses: int, total_gagal: int,
+    akun_digunakan: set[str], acct_mgr: AccountManager,
+    config: Config,
+):
+    """STEP 8: Hitung durasi, tampilkan summary, kirim notifikasi selesai."""
+    end_time = datetime.now()
+    total_secs = int((end_time - start_time).total_seconds())
+    durasi_str = f"{total_secs//3600}j {(total_secs%3600)//60}m {total_secs%60}d"
+    foto_sisa = max(0, total_foto - (total_sukses + total_gagal))
+    akun_diskip = [e for e, s in acct_mgr.status.items() if s != "active"]
 
     display_summary(
         total_sukses=total_sukses,
@@ -739,7 +547,8 @@ def run_bot():
 
     _save_state_now()
 
-    send_all_notifications(config, "done",
+    config_dict = config.to_dict()
+    send_all_notifications(config_dict, "done",
         total_sukses=total_sukses,
         total_gagal=total_gagal,
         durasi=durasi_str,
@@ -750,6 +559,214 @@ def run_bot():
     )
 
     print_success("Program selesai! 🎉")
+
+
+# ============================================================
+# MAIN BOT FUNCTION (Orchestrator)
+# ============================================================
+
+def run_bot():
+    """Orchestrator utama — memanggil fungsi-fungsi kecil secara berurutan."""
+    global _bot_state, _session, _driver, _config
+    start_time = datetime.now()
+
+    # ===== STEP 1: Baca Config + Secrets =====
+    print_info("Membaca konfigurasi...")
+    load_dotenv(os.path.join(BASE_DIR, ".env"))
+    config = load_config(CONFIG_PATH)
+    inject_secrets_from_env(config)
+    _config = config
+
+    logger = UploadLogger(LOG_PATH)
+    session = SessionState(SESSION_STATE_PATH)
+    _session = session
+
+    config_dict = config.to_dict()
+    acct_mgr = AccountManager(config.accounts, config_dict)
+    _bot_state.akun_status = acct_mgr.status
+
+    # ===== STEP 2-6: Initialize session =====
+    (pending_photos, processed_map, resume_foto_index,
+     putaran_ke, manual_description) = _initialize_session(
+        config, logger, session, acct_mgr
+    )
+    _bot_state.putaran_ke = putaran_ke
+
+    total_foto = len(pending_photos) + resume_foto_index
+
+    # ===== STEP 7: Mulai upload =====
+    console.print()
+    print_info("Memulai proses upload...")
+
+    estimasi_str = f"{(len(pending_photos) * (config.delay_min + config.delay_max) / 2) / 60:.1f} menit"
+    send_all_notifications(config_dict, "start",
+        total_foto=len(pending_photos),
+        total_akun=len(config.accounts),
+        akun_pertama=config.accounts[0].email,
+        foto_folder=config.foto_folder,
+        estimasi=estimasi_str,
+    )
+
+    current_account_idx = acct_mgr.find_next_active(0)
+    if current_account_idx == -1:
+        print_warning("Semua akun sudah di-skip atau mencapai batas!")
+        display_all_accounts_down(acct_mgr.status, len(pending_photos))
+        send_all_notifications(config_dict, "error",
+            error_msg="Semua akun tidak aktif saat program dimulai")
+        sys.exit(0)
+
+    driver = None
+    akun_digunakan: set[str] = set()
+    foto_global_index = resume_foto_index
+
+    try:
+        progress = create_progress_bar()
+        with progress:
+            upload_task = progress.add_task(
+                "📤 Uploading pins...",
+                total=len(pending_photos)
+            )
+
+            for i, photo_path in enumerate(pending_photos):
+                filename = os.path.basename(photo_path)
+                processed_path = processed_map.get(photo_path, photo_path)
+
+                _bot_state.foto_index = foto_global_index + i
+                _bot_state.foto_terakhir = filename
+
+                # --- Rotasi akun ---
+                (driver, current_account_idx,
+                 should_break, should_continue) = _handle_account_rotation(
+                    driver, i, filename, acct_mgr,
+                    config, current_account_idx, pending_photos
+                )
+                if should_break:
+                    break
+                if should_continue:
+                    continue
+
+                account = config.accounts[current_account_idx]
+                akun_digunakan.add(account.email)
+                _bot_state.akun_index = current_account_idx
+
+                # --- Driver + Login ---
+                remaining = len(pending_photos) - i
+                driver, login_ok, skip_idx = _ensure_driver_and_login(
+                    driver, account, config.headless_mode,
+                    acct_mgr, filename, remaining
+                )
+                if skip_idx == -2:  # Fatal driver error
+                    send_all_notifications(config_dict, "error",
+                        error_msg="Gagal membuat Chrome driver",
+                        akun=account.email)
+                    break
+                if skip_idx is not None:
+                    if skip_idx == -1:
+                        break
+                    current_account_idx = skip_idx
+                    continue
+
+                # --- Upload ---
+                success, _ = _upload_single_photo(
+                    driver, photo_path, processed_path,
+                    account, config, acct_mgr, logger,
+                    manual_description,
+                )
+
+                if success:
+                    _bot_state.total_sukses += 1
+                    acct_mgr.record_success(account.email)
+                    print_success(f"Berhasil upload: {filename}")
+                else:
+                    _bot_state.total_gagal += 1
+                    acct_mgr.record_failure(account.email)
+                    print_error(f"Gagal upload: {filename}")
+                    write_error_log(ERROR_LOG_PATH, account.email, filename,
+                                    "Upload gagal setelah 3x retry")
+
+                    if acct_mgr.has_too_many_fails(account.email):
+                        print_error(f"Akun {account.email} gagal 3x berturut-turut!")
+                        close_driver(driver)
+                        driver = None
+                        _driver = None
+                        next_idx = acct_mgr.skip(
+                            account.email, "error", foto_gagal=filename
+                        )
+                        if next_idx == -1:
+                            display_all_accounts_down(
+                                acct_mgr.status, len(pending_photos) - (i + 1))
+                            break
+                        current_account_idx = next_idx
+
+                # --- Update state ---
+                _bot_state.status_terakhir = "success" if success else "failed"
+                _bot_state.upload_count_per_akun[account.email] = \
+                    acct_mgr.get_upload_count(account.email)
+                _save_state_now()
+
+                akun_upload_count = acct_mgr.get_upload_count(account.email)
+                sisa_foto = len(pending_photos) - (i + 1)
+
+                display_status_table(
+                    akun_aktif=account.email,
+                    chrome_profile=account.chrome_profile_path or "N/A",
+                    upload_ke=akun_upload_count,
+                    max_upload=config.max_upload_per_akun,
+                    sisa_foto=sisa_foto,
+                    total_sukses=_bot_state.total_sukses,
+                    total_gagal=_bot_state.total_gagal,
+                )
+
+                progress.update(upload_task, advance=1)
+
+                if _bot_state.total_sukses > 0 and _bot_state.total_sukses % 10 == 0:
+                    send_all_notifications(config_dict, "progress",
+                        akun_aktif=account.email,
+                        upload_count=akun_upload_count,
+                        max_upload=config.max_upload_per_akun,
+                        sisa_foto=sisa_foto,
+                        board=account.board,
+                    )
+
+                if i < len(pending_photos) - 1:
+                    delay = random_delay(config.delay_min, config.delay_max)
+
+    except KeyboardInterrupt:
+        print_warning("\n⚠️ Program dihentikan oleh user (Ctrl+C)")
+        _save_state_now()
+
+    except Exception as e:
+        print_error(f"Error tidak terduga: {e}")
+        current_email = ""
+        if current_account_idx < len(config.accounts):
+            current_email = config.accounts[current_account_idx].email
+        write_error_log(ERROR_LOG_PATH, current_email,
+                        _bot_state.foto_terakhir, str(e))
+        send_all_notifications(config_dict, "error",
+            error_msg=str(e),
+            akun=current_email,
+            foto_terakhir=_bot_state.foto_terakhir)
+        _save_state_now()
+
+    finally:
+        if driver:
+            try:
+                print_info("Logout sebelum menutup browser...")
+                logout(driver)
+            except Exception:
+                pass
+            try:
+                close_driver(driver)
+            except Exception:
+                pass
+            _driver = None
+
+    # ===== STEP 8: Summary =====
+    _generate_summary(
+        start_time, total_foto,
+        _bot_state.total_sukses, _bot_state.total_gagal,
+        akun_digunakan, acct_mgr, config,
+    )
 
 
 if __name__ == "__main__":
