@@ -314,10 +314,15 @@ def prepare_photo(photo_path: str, foto_folder: str, config: dict) -> str:
     os.makedirs(optimized_dir, exist_ok=True)
     
     # Step 1: Watermark
-    watermark_text = config.get("watermark_text", "www.roxy.my.id")
+    watermark_text = config.get("watermark_text", "www.kumpulenak.web.id")
     watermark_opacity = config.get("watermark_opacity", 0.8)
     
-    watermarked_path = os.path.join(watermarked_dir, filename)
+    # GIF → disimpan sebagai JPEG setelah watermark
+    if ext == ".gif":
+        wm_filename = name_without_ext + ".jpg"
+    else:
+        wm_filename = filename
+    watermarked_path = os.path.join(watermarked_dir, wm_filename)
     
     # Cek apakah versi watermarked sudah ada
     if not os.path.exists(watermarked_path):

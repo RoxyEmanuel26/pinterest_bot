@@ -299,7 +299,8 @@ class SessionState:
              total_sukses: int, total_gagal: int,
              foto_terakhir: str, status_terakhir: str,
              akun_status: dict[str, str],
-             putaran_ke: int = 1):
+             putaran_ke: int = 1,
+             foto_folder: str = ""):
         """
         Simpan state sesi saat ini ke session_state.json secara ATOMIC.
         
@@ -316,6 +317,7 @@ class SessionState:
             status_terakhir: Status terakhir ("success" atau "failed")
             akun_status: Dict {email: "active"/"limit_reached"/"banned"/"error"}
             putaran_ke: Putaran rotasi akun saat ini
+            foto_folder: Path folder foto yang sedang diproses
         """
         self.data = {
             "last_updated": datetime.now().isoformat(timespec="seconds"),
@@ -328,10 +330,12 @@ class SessionState:
             "status_terakhir": status_terakhir,
             "akun_status": akun_status,
             "putaran_ke": putaran_ke,
+            "foto_folder": foto_folder,
         }
         
         # Atomic write: temp file → rename
         state_dir = os.path.dirname(self.state_path)
+        tmp_path = None
         try:
             fd, tmp_path = tempfile.mkstemp(
                 suffix=".tmp", prefix="session_", dir=state_dir
@@ -346,7 +350,7 @@ class SessionState:
             print(f"[WARNING] Gagal simpan session_state.json: {e}")
             # Cleanup temp file jika masih ada
             try:
-                if os.path.exists(tmp_path):
+                if tmp_path and os.path.exists(tmp_path):
                     os.unlink(tmp_path)
             except Exception:
                 pass

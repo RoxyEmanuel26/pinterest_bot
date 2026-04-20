@@ -73,6 +73,85 @@ arguments[0].scrollIntoView({block:'center', inline:'nearest'});
 arguments[0].click();
 """
 
+# Isi contenteditable via synthetic paste (TIDAK sentuh system clipboard)
+_JS_FILL_INSTANT = """
+(function(el, text) {
+    el.focus();
+
+    // 1. Select all & hapus konten lama
+    var sel = window.getSelection();
+    if (sel.rangeCount > 0) {
+        var range = document.createRange();
+        range.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        sel.deleteFromDocument();
+    } else {
+        el.textContent = '';
+    }
+
+    // 2. Synthetic paste via DataTransfer (tanpa system clipboard)
+    var inserted = false;
+    try {
+        var dt = new DataTransfer();
+        dt.setData('text/plain', text);
+        var pe = new ClipboardEvent('paste', {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dt
+        });
+        el.dispatchEvent(pe);
+        // Cek apakah editor meng-handle paste event
+        var content = (el.textContent || el.innerText || '').trim();
+        if (content.length >= 3) inserted = true;
+    } catch(e) {}
+
+    // 3. Fallback: execCommand insertText
+    if (!inserted) {
+        try {
+            document.execCommand('insertText', false, text);
+            var content2 = (el.textContent || el.innerText || '').trim();
+            if (content2.length >= 3) inserted = true;
+        } catch(e) {}
+    }
+
+    // 4. Fallback terakhir: set textContent langsung
+    if (!inserted) {
+        el.textContent = text;
+    }
+
+    // 5. Trigger events agar React mendeteksi perubahan
+    el.dispatchEvent(new InputEvent('input', {
+        bubbles: true, inputType: 'insertText', data: text
+    }));
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+})(arguments[0], arguments[1]);
+"""
+
+
+def _fill_instant(driver, el, text: str) -> None:
+    """
+    Isi elemen secara instan TANPA mengganggu system clipboard.
+    - input/textarea  → native value setter (React-aware)
+    - contenteditable → synthetic paste via DataTransfer
+    Aman dipakai sambil main game / browsing.
+    """
+    try:
+        tag = el.tag_name.lower()
+        is_ce = el.get_attribute('contenteditable') in ('true', 'plaintext-only')
+
+        if is_ce or tag in ('div', 'span', 'p'):
+            driver.execute_script(_JS_FILL_INSTANT, el, text)
+        else:
+            driver.execute_script(_JS_SET_NATIVE_VALUE, el, text)
+    except Exception:
+        # Fallback terakhir: send_keys (lambat tapi pasti jalan)
+        try:
+            el.click()
+            el.send_keys(Keys.CONTROL, "a")
+            el.send_keys(text)
+        except Exception:
+            pass
 
 
 
@@ -464,7 +543,7 @@ def upload_pin(driver, image_path: str, title: str,
                 return el
             return _wait_for_visible(driver, css_list, timeout=timeout)
 
-        # ── 3. Isi Judul ─────────────────────────────────────────────
+        # ── 3. Isi Judul (input biasa → JS native setter) ───────────
         if title:
             _title_css = [
                 'input[data-test-id="pin-draft-title"]',
@@ -474,12 +553,15 @@ def upload_pin(driver, image_path: str, title: str,
             ]
             title_el = _fast_find(_title_css)
             if title_el:
-                title_el.click()
-                title_el.clear()
-                title_el.send_keys(title)
+                driver.execute_script(_JS_SET_NATIVE_VALUE, title_el, title)
+                time.sleep(0.1)
+                # Verifikasi — jika kosong, fallback clipboard paste
+                actual = title_el.get_attribute("value") or ""
+                if not actual.strip():
+                    _fill_instant(driver, title_el, title)
                 print_info("   ✅ Judul terisi")
 
-        # ── 4. Isi Deskripsi ──────────────────────────────────────────
+        # ── 4. Isi Deskripsi (contenteditable → synthetic paste) ──────
         if description:
             _desc_css = [
                 'div[data-test-id="pin-draft-description"] div[role="textbox"]',
@@ -490,12 +572,10 @@ def upload_pin(driver, image_path: str, title: str,
             ]
             desc_el = _fast_find(_desc_css)
             if desc_el:
-                desc_el.click()
-                desc_el.send_keys(Keys.CONTROL, "a")
-                desc_el.send_keys(description)
+                _fill_instant(driver, desc_el, description)
                 print_info("   ✅ Deskripsi terisi")
 
-        # ── 5. Isi Tautan ─────────────────────────────────────────────
+        # ── 5. Isi Tautan (input biasa → JS native setter) ────────────
         if link_url:
             _link_css = [
                 'input[id="storyboard-selector-link"]',
@@ -507,10 +587,16 @@ def upload_pin(driver, image_path: str, title: str,
             ]
             lf = _fast_find(_link_css)
             if lf:
-                lf.click()
-                lf.clear()
-                lf.send_keys(link_url)
-                lf.send_keys(Keys.TAB)
+                driver.execute_script(_JS_SET_NATIVE_VALUE, lf, link_url)
+                time.sleep(0.1)
+                # Verifikasi — jika kosong, fallback clipboard paste
+                actual = lf.get_attribute("value") or ""
+                if not actual.strip():
+                    _fill_instant(driver, lf, link_url)
+                try:
+                    lf.send_keys(Keys.TAB)
+                except Exception:
+                    pass
                 print_info("   ✅ Tautan terisi")
 
         # ── 6. Pilih Board ──────────────────────────────────────────

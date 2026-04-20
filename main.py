@@ -23,6 +23,7 @@ Konfigurasi:
 import os
 import sys
 import json
+import random
 import time
 import signal
 from datetime import datetime, timedelta
@@ -55,6 +56,66 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 LOG_PATH = os.path.join(BASE_DIR, "upload_log.csv")
 SESSION_STATE_PATH = os.path.join(BASE_DIR, "session_state.json")
 ERROR_LOG_PATH = os.path.join(BASE_DIR, "error_log.txt")
+JUDUL_POOL_PATH = os.path.join(BASE_DIR, "judul_pool.txt")  # default fallback
+
+# Cache judul pool agar tidak baca file berulang kali
+_judul_pool_cache: list[str] | None = None
+
+
+def load_judul_pool(pool_file: str = "") -> list[str]:
+    """Baca file judul pool dan kembalikan list judul (skip baris kosong)."""
+    global _judul_pool_cache
+    if _judul_pool_cache is not None:
+        return _judul_pool_cache
+
+    # Tentukan path file pool
+    if pool_file:
+        if os.path.isabs(pool_file):
+            pool_path = pool_file
+        else:
+            pool_path = os.path.join(BASE_DIR, pool_file)
+    else:
+        pool_path = JUDUL_POOL_PATH
+
+    if not os.path.exists(pool_path):
+        print_warning(f"File judul pool tidak ditemukan: {pool_path}")
+        _judul_pool_cache = []
+        return _judul_pool_cache
+
+    with open(pool_path, "r", encoding="utf-8") as f:
+        lines = [line.strip() for line in f if line.strip()]
+
+    if not lines:
+        print_warning(f"{os.path.basename(pool_path)} kosong, akan fallback ke generate_title()")
+
+    _judul_pool_cache = lines
+    print_info(f"Loaded {len(lines)} judul dari {os.path.basename(pool_path)}")
+    return _judul_pool_cache
+
+
+def get_random_judul(filename: str, config, account=None) -> str:
+    """
+    Pilih judul berdasarkan title_mode di config:
+      - "pool"     → random dari judul_pool_file
+      - "template" → pakai judul_template dari akun
+      - "auto"     → generate dari nama file
+    """
+    mode = getattr(config, "title_mode", "auto").lower()
+
+    if mode == "pool":
+        pool = load_judul_pool(getattr(config, "judul_pool_file", ""))
+        if pool:
+            return random.choice(pool)
+        # Fallback ke auto jika pool kosong
+        return generate_title(filename)
+
+    elif mode == "template":
+        if account and account.judul_template:
+            return account.judul_template
+        return generate_title(filename)
+
+    else:  # "auto" atau mode tidak dikenal
+        return generate_title(filename)
 
 
 # ============================================================
@@ -78,6 +139,7 @@ def _save_state_now():
             status_terakhir=_bot_state.status_terakhir,
             akun_status=_bot_state.akun_status,
             putaran_ke=_bot_state.putaran_ke,
+            foto_folder=_bot_state.foto_folder,
         )
 
 
@@ -90,6 +152,7 @@ def _signal_handler(signum, frame):
             close_driver(_driver)
         except Exception:
             pass
+        _driver = None
     sys.exit(0)
 
 
@@ -193,16 +256,18 @@ def preprocess_photos(pending_photos: list[str], foto_folder: str,
 
 def _initialize_session(config: Config, logger: UploadLogger,
                         session: SessionState, acct_mgr: AccountManager
-                        ) -> tuple[list[str], dict[str, str], int, int, str | None]:
+                        ) -> tuple[list[str], dict[str, str], int, int, int, str | None]:
     """
     STEP 1-6: Load config, scan foto, preprocess, session resume, konfirmasi user.
 
     Returns:
-        (pending_photos, processed_map, resume_foto_index, putaran_ke, manual_description)
+        (pending_photos, processed_map, resume_foto_index, resume_akun_index, putaran_ke, manual_description)
     """
     resume_from_session = False
     resume_foto_index = 0
+    resume_akun_index = 0
     putaran_ke = 1
+    _bot_state.foto_folder = config.foto_folder
 
     # --- Cek session sebelumnya ---
     if session.exists():
@@ -211,16 +276,49 @@ def _initialize_session(config: Config, logger: UploadLogger,
             session.display_summary()
             lanjutkan = Confirm.ask("  🔄 Lanjutkan sesi sebelumnya?", default=True)
             if lanjutkan:
+                # --- Deteksi perubahan folder ---
+                saved_folder = prev_state.get("foto_folder", "")
+                current_folder = os.path.normpath(config.foto_folder)
+                saved_folder_norm = os.path.normpath(saved_folder) if saved_folder else ""
+                folder_changed = saved_folder_norm and saved_folder_norm != current_folder
+
+                if folder_changed:
+                    print_warning(f"Folder foto berubah!")
+                    print_info(f"   Sesi lama : {saved_folder}")
+                    print_info(f"   Folder baru: {config.foto_folder}")
+                    print_info("   → Foto direset ke awal, posisi akun tetap dilanjutkan.")
+
                 resume_from_session = True
-                resume_foto_index = prev_state.get("foto_index", 0)
+                resume_akun_index = prev_state.get("akun_index", 0)
+                # Bounds check — jika akun dihapus dari config
+                if resume_akun_index >= len(config.accounts):
+                    resume_akun_index = 0
                 putaran_ke = prev_state.get("putaran_ke", 1)
-                _bot_state.total_sukses = prev_state.get("total_sukses", 0)
-                _bot_state.total_gagal = prev_state.get("total_gagal", 0)
                 _bot_state.putaran_ke = putaran_ke
+                _bot_state.foto_folder = config.foto_folder
                 acct_mgr.restore_status(prev_state.get("akun_status", {}))
-                print_success(f"Melanjutkan dari foto ke-{resume_foto_index + 1}")
+
+                # Restore upload count per akun agar rotasi berjalan benar
+                saved_counts = prev_state.get("upload_count_per_akun", {})
+                for email, count in saved_counts.items():
+                    if email in acct_mgr.session_upload_count:
+                        acct_mgr.session_upload_count[email] = count
+
+                akun_email = config.accounts[resume_akun_index].email
+                if folder_changed:
+                    # Folder berubah → reset statistik, posisi akun tetap
+                    _bot_state.total_sukses = 0
+                    _bot_state.total_gagal = 0
+                    print_success(f"Folder berubah, foto direset. Lanjut akun: {akun_email}")
+                else:
+                    # Folder sama → lanjutkan statistik + posisi akun
+                    # Foto yang sudah sukses otomatis di-skip oleh upload_log.csv
+                    _bot_state.total_sukses = prev_state.get("total_sukses", 0)
+                    _bot_state.total_gagal = prev_state.get("total_gagal", 0)
+                    print_success(f"Melanjutkan sesi, akun: {akun_email}")
             else:
                 session.delete()
+                _bot_state.foto_folder = config.foto_folder
                 print_info("Session dihapus. Memulai dari awal.")
 
     # --- Scan foto ---
@@ -234,19 +332,12 @@ def _initialize_session(config: Config, logger: UploadLogger,
     if not pending_photos:
         print_warning("Tidak ada foto baru yang perlu diupload!")
         print_info("Semua foto sudah pernah diupload (tercatat di upload_log.csv)")
+        if session.exists():
+            session.delete()
         sys.exit(0)
 
     total_foto = len(pending_photos)
     print_success(f"Ditemukan {total_foto} foto baru untuk diupload")
-
-    if resume_from_session and resume_foto_index > 0:
-        if resume_foto_index < total_foto:
-            pending_photos = pending_photos[resume_foto_index:]
-            print_info(f"Melompati {resume_foto_index} foto yang sudah diproses")
-        else:
-            print_warning("Semua foto sudah diproses di sesi sebelumnya!")
-            session.delete()
-            sys.exit(0)
 
     # --- Watermark + Optimasi ---
     print_info("Memproses foto (watermark + optimasi)...")
@@ -273,7 +364,7 @@ def _initialize_session(config: Config, logger: UploadLogger,
     if config.deskripsi_mode == "manual":
         manual_description = Prompt.ask("  ✏️  Masukkan deskripsi untuk semua pin")
 
-    return pending_photos, processed_map, resume_foto_index, putaran_ke, manual_description
+    return pending_photos, processed_map, resume_foto_index, resume_akun_index, putaran_ke, manual_description
 
 
 def _ensure_driver_and_login(
@@ -308,18 +399,25 @@ def _ensure_driver_and_login(
                             f"Chrome driver error: {e}")
             return None, False, -2  # Fatal error
 
-        # --- Login setelah driver baru ---
-        if not is_logged_in(driver):
-            print_info(f"Login ke akun: {account.email}")
-            login_success = _login_with_retry(driver, account)
-            if not login_success:
-                print_error(f"Login gagal untuk {account.email}")
-                close_driver(driver)
-                _driver = None
-                next_idx = acct_mgr.skip(account.email, "banned", foto_gagal=filename)
-                if next_idx == -1:
-                    display_all_accounts_down(acct_mgr.status, remaining)
-                return None, False, next_idx
+        # --- Logout dulu jika ada sesi lain, lalu login ---
+        if is_logged_in(driver):
+            print_info("Logout akun sebelumnya terlebih dahulu...")
+            try:
+                logout(driver)
+                time.sleep(1)
+            except Exception:
+                pass
+
+        print_info(f"Login ke akun: {account.email}")
+        login_success = _login_with_retry(driver, account)
+        if not login_success:
+            print_error(f"Login gagal untuk {account.email}")
+            close_driver(driver)
+            _driver = None
+            next_idx = acct_mgr.skip(account.email, "banned", foto_gagal=filename)
+            if next_idx == -1:
+                display_all_accounts_down(acct_mgr.status, remaining)
+            return None, False, next_idx
 
     else:
         # --- Cek sesi masih aktif ---
@@ -374,6 +472,7 @@ def _handle_account_rotation(
             _bot_state.putaran_ke += 1
             print_info(f"🔄 Semua akun selesai! Memulai putaran ke-{_bot_state.putaran_ke}...")
             acct_mgr.reset_limits()
+            _bot_state.upload_count_per_akun = {e: 0 for e in _bot_state.upload_count_per_akun}
             current_account_idx = acct_mgr.find_next_active(0)
             if current_account_idx == -1:
                 return driver, current_account_idx, True, False
@@ -409,8 +508,35 @@ def _handle_account_rotation(
         prev_profile = account.chrome_profile_path
         next_idx = acct_mgr.skip(account.email, "limit_reached", foto_gagal=filename)
         if next_idx == -1:
-            display_all_accounts_down(acct_mgr.status, remaining)
-            return driver, current_account_idx, True, False
+            # Semua akun sudah di-skip — cek apakah bisa mulai putaran baru
+            if acct_mgr.has_limit_only():
+                _bot_state.putaran_ke += 1
+                print_info(f"🔄 Semua akun limit! Memulai putaran ke-{_bot_state.putaran_ke}...")
+                acct_mgr.reset_limits()
+                _bot_state.upload_count_per_akun = {e: 0 for e in _bot_state.upload_count_per_akun}
+                current_account_idx = acct_mgr.find_next_active(0)
+                if current_account_idx == -1:
+                    display_all_accounts_down(acct_mgr.status, remaining)
+                    return driver, current_account_idx, True, False
+
+                new_account = accounts[current_account_idx]
+                # Logout akun lama, login akun baru
+                if driver:
+                    try:
+                        logout(driver)
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                    login_success = _login_with_retry(driver, new_account)
+                    if not login_success:
+                        print_error(f"Login gagal untuk {new_account.email}")
+                        close_driver(driver)
+                        driver = None
+                        _driver = None
+                return driver, current_account_idx, False, False
+            else:
+                display_all_accounts_down(acct_mgr.status, remaining)
+                return driver, current_account_idx, True, False
 
         current_account_idx = next_idx
         new_account = accounts[current_account_idx]
@@ -459,7 +585,7 @@ def _upload_single_photo(
     filename = os.path.basename(photo_path)
 
     # --- Generate judul + deskripsi + hashtag ---
-    title = account.judul_template if account.judul_template else generate_title(filename)
+    title = get_random_judul(filename, config, account)
 
     hashtag_auto = generate_hashtags(filename, max_count=config.max_hashtag)
     hashtags = gabungkan_hashtag(hashtag_auto, account.hashtag_custom,
@@ -587,7 +713,7 @@ def run_bot():
 
     # ===== STEP 2-6: Initialize session =====
     (pending_photos, processed_map, resume_foto_index,
-     putaran_ke, manual_description) = _initialize_session(
+     resume_akun_index, putaran_ke, manual_description) = _initialize_session(
         config, logger, session, acct_mgr
     )
     _bot_state.putaran_ke = putaran_ke
@@ -607,7 +733,7 @@ def run_bot():
         estimasi=estimasi_str,
     )
 
-    current_account_idx = acct_mgr.find_next_active(0)
+    current_account_idx = acct_mgr.find_next_active(resume_akun_index)
     if current_account_idx == -1:
         print_warning("Semua akun sudah di-skip atau mencapai batas!")
         display_all_accounts_down(acct_mgr.status, len(pending_photos))
@@ -751,11 +877,6 @@ def run_bot():
     finally:
         if driver:
             try:
-                print_info("Logout sebelum menutup browser...")
-                logout(driver)
-            except Exception:
-                pass
-            try:
                 close_driver(driver)
             except Exception:
                 pass
@@ -767,6 +888,12 @@ def run_bot():
         _bot_state.total_sukses, _bot_state.total_gagal,
         akun_digunakan, acct_mgr, config,
     )
+
+    # Hapus session jika semua foto selesai diupload
+    foto_sisa = total_foto - (_bot_state.total_sukses + _bot_state.total_gagal)
+    if foto_sisa <= 0 and session.exists():
+        session.delete()
+        print_info("✨ Session dihapus — semua foto telah selesai diproses.")
 
 
 if __name__ == "__main__":
