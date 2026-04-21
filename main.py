@@ -468,9 +468,26 @@ def _handle_account_rotation(
     # --- Cek semua akun non-active ---
     if acct_mgr.all_inactive():
         if acct_mgr.has_limit_only():
-            # Mulai putaran baru!
-            _bot_state.putaran_ke += 1
-            print_info(f"🔄 Semua akun selesai! Memulai putaran ke-{_bot_state.putaran_ke}...")
+            # Minta konfirmasi user sebelum putaran baru
+            putaran_baru = _bot_state.putaran_ke + 1
+            print()
+            print_info(f"🔄 Semua akun selesai putaran ke-{_bot_state.putaran_ke}!")
+            print_info(f"📸 Sisa foto: {remaining} foto belum diupload")
+            print()
+            try:
+                jawaban = input(f"   ➤ Lanjut ke putaran ke-{putaran_baru}? [y/n]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                jawaban = "n"
+
+            if jawaban != "y":
+                print_info("⏸️  Program dihentikan oleh user. State disimpan.")
+                print_info("   Jalankan ulang program kapan saja untuk melanjutkan.")
+                _save_state_now()
+                return driver, current_account_idx, True, False
+
+            # User setuju → mulai putaran baru
+            _bot_state.putaran_ke = putaran_baru
+            print_info(f"🚀 Memulai putaran ke-{_bot_state.putaran_ke}...")
             acct_mgr.reset_limits()
             _bot_state.upload_count_per_akun = {e: 0 for e in _bot_state.upload_count_per_akun}
             current_account_idx = acct_mgr.find_next_active(0)
@@ -510,8 +527,26 @@ def _handle_account_rotation(
         if next_idx == -1:
             # Semua akun sudah di-skip — cek apakah bisa mulai putaran baru
             if acct_mgr.has_limit_only():
-                _bot_state.putaran_ke += 1
-                print_info(f"🔄 Semua akun limit! Memulai putaran ke-{_bot_state.putaran_ke}...")
+                # Minta konfirmasi user sebelum putaran baru
+                putaran_baru = _bot_state.putaran_ke + 1
+                print()
+                print_info(f"🔄 Semua akun limit di putaran ke-{_bot_state.putaran_ke}!")
+                print_info(f"📸 Sisa foto: {remaining} foto belum diupload")
+                print()
+                try:
+                    jawaban = input(f"   ➤ Lanjut ke putaran ke-{putaran_baru}? [y/n]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    jawaban = "n"
+
+                if jawaban != "y":
+                    print_info("⏸️  Program dihentikan oleh user. State disimpan.")
+                    print_info("   Jalankan ulang program kapan saja untuk melanjutkan.")
+                    _save_state_now()
+                    return driver, current_account_idx, True, False
+
+                # User setuju → mulai putaran baru
+                _bot_state.putaran_ke = putaran_baru
+                print_info(f"🚀 Memulai putaran ke-{_bot_state.putaran_ke}...")
                 acct_mgr.reset_limits()
                 _bot_state.upload_count_per_akun = {e: 0 for e in _bot_state.upload_count_per_akun}
                 current_account_idx = acct_mgr.find_next_active(0)
