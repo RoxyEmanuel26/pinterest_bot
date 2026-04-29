@@ -125,7 +125,7 @@ def _calc_font_size_for_width(text: str, target_width: int,
 
 
 def add_watermark(src_path: str, dst_path: str, text: str = "www.roxy.my.id",
-                  opacity: float = 0.8, width_ratio: float = 0.5) -> str:
+                  opacity: float = 0.8, width_ratio: float = 0.8) -> str:
     """
     Tambahkan watermark teks ke foto.
     
@@ -316,6 +316,7 @@ def prepare_photo(photo_path: str, foto_folder: str, config: dict) -> str:
     # Step 1: Watermark
     watermark_text = config.get("watermark_text", "www.kumpulenak.web.id")
     watermark_opacity = config.get("watermark_opacity", 0.8)
+    watermark_width_ratio = config.get("watermark_width_ratio", 0.8)
     
     # GIF → disimpan sebagai JPEG setelah watermark
     if ext == ".gif":
@@ -331,6 +332,7 @@ def prepare_photo(photo_path: str, foto_folder: str, config: dict) -> str:
             dst_path=watermarked_path,
             text=watermark_text,
             opacity=watermark_opacity,
+            width_ratio=watermark_width_ratio,
         )
     
     # Step 2: Optimasi

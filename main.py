@@ -453,7 +453,8 @@ def _login_with_retry(driver, account: Account, max_retries: int = 2) -> bool:
 def _handle_account_rotation(
     driver, i: int, filename: str, acct_mgr: AccountManager,
     config: Config, current_account_idx: int,
-    pending_photos: list[str]
+    pending_photos: list[str],
+    progress=None
 ) -> tuple:
     """
     Cek batas upload, rotasi akun, dan handle putaran baru.
@@ -474,10 +475,17 @@ def _handle_account_rotation(
             print_info(f"🔄 Semua akun selesai putaran ke-{_bot_state.putaran_ke}!")
             print_info(f"📸 Sisa foto: {remaining} foto belum diupload")
             print()
+            
+            if progress:
+                progress.stop()
+                
             try:
                 jawaban = input(f"   ➤ Lanjut ke putaran ke-{putaran_baru}? [y/n]: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 jawaban = "n"
+                
+            if progress:
+                progress.start()
 
             if jawaban != "y":
                 print_info("⏸️  Program dihentikan oleh user. State disimpan.")
@@ -533,10 +541,17 @@ def _handle_account_rotation(
                 print_info(f"🔄 Semua akun limit di putaran ke-{_bot_state.putaran_ke}!")
                 print_info(f"📸 Sisa foto: {remaining} foto belum diupload")
                 print()
+                
+                if progress:
+                    progress.stop()
+
                 try:
                     jawaban = input(f"   ➤ Lanjut ke putaran ke-{putaran_baru}? [y/n]: ").strip().lower()
                 except (EOFError, KeyboardInterrupt):
                     jawaban = "n"
+                
+                if progress:
+                    progress.start()
 
                 if jawaban != "y":
                     print_info("⏸️  Program dihentikan oleh user. State disimpan.")
@@ -799,7 +814,8 @@ def run_bot():
                 (driver, current_account_idx,
                  should_break, should_continue) = _handle_account_rotation(
                     driver, i, filename, acct_mgr,
-                    config, current_account_idx, pending_photos
+                    config, current_account_idx, pending_photos,
+                    progress=progress
                 )
                 if should_break:
                     break
