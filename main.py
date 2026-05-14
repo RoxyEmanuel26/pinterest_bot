@@ -234,7 +234,7 @@ def preprocess_photos(pending_photos: list[str], foto_folder: str,
     progress = create_progress_bar()
     with progress:
         task = progress.add_task(
-            "⚙️  Memproses foto (watermark + optimasi)...",
+            "⚙️  Memproses foto (mirror + warm + watermark + optimasi)...",
             total=len(pending_photos)
         )
         for photo_path in pending_photos:
@@ -340,7 +340,7 @@ def _initialize_session(config: Config, logger: UploadLogger,
     print_success(f"Ditemukan {total_foto} foto baru untuk diupload")
 
     # --- Watermark + Optimasi ---
-    print_info("Memproses foto (watermark + optimasi)...")
+    print_info("Memproses foto (mirror + warm filter + watermark + optimasi)...")
     processed_map = preprocess_photos(pending_photos, config.foto_folder, config)
 
     # --- Tampilkan info awal ---

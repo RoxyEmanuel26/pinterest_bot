@@ -58,7 +58,7 @@ Edit file `config.json` sesuai kebutuhan Anda:
   "headless_mode": false,
   "max_hashtag": 10,
   "deskripsi_mode": "auto",
-  "watermark_text": "www.roxy.my.id",
+  "watermark_text": "https://www.kumpulenak.web.id",
   "watermark_opacity": 0.8,
   "telegram_bot_token": "",
   "telegram_chat_id": "",
@@ -85,7 +85,7 @@ Edit file `config.json` sesuai kebutuhan Anda:
 | `headless_mode` | Jalankan Chrome tanpa tampilan (true/false) | `false` |
 | `max_hashtag` | Jumlah maksimum hashtag per pin | `10` |
 | `deskripsi_mode` | Mode deskripsi: `"auto"` atau `"manual"` | `"auto"` |
-| `watermark_text` | Teks watermark yang ditambahkan ke foto | `"www.roxy.my.id"` |
+| `watermark_text` | Teks watermark yang ditambahkan ke foto | `"https://www.kumpulenak.web.id"` |
 | `watermark_opacity` | Transparansi watermark (0.0 - 1.0) | `0.8` |
 | `telegram_bot_token` | Token bot Telegram (kosongkan jika tidak menggunakan) | `""` |
 | `telegram_chat_id` | Chat ID Telegram (kosongkan jika tidak menggunakan) | `""` |
@@ -216,4 +216,4 @@ tanggung jawab sendiri.
 
 ---
 
-**Dibuat oleh**: [roxy.my.id](https://www.roxy.my.id)
+**Dibuat oleh**: [https://www.kumpulenak.web.id](https://www.kumpulenak.web.id)

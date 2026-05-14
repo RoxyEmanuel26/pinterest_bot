@@ -505,7 +505,7 @@ def display_initial_info(total_foto: int, total_akun: int,
     console.print()
     console.print(Panel.fit(
         "[bold cyan]🎯 Pinterest Auto-Upload Bot[/bold cyan]",
-        subtitle="by roxy.my.id"
+        subtitle="https://www.kumpulenak.web.id"
     ))
     console.print()
 

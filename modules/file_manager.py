@@ -3,7 +3,7 @@ modules/file_manager.py
 ========================
 Manajemen file foto: scan folder, watermark otomatis, dan optimasi gambar.
 Menangani seluruh pipeline pemrosesan foto sebelum upload:
-foto asli → watermark → optimasi → siap upload.
+foto asli → mirror → warm filter → watermark → optimasi → siap upload.
 """
 
 import os
@@ -11,7 +11,7 @@ import glob
 import functools
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 
 # Format foto yang didukung
@@ -46,6 +46,87 @@ def scan_photos(folder: str) -> list[str]:
     # Urutkan berdasarkan tanggal modifikasi terbaru (newest first)
     photos.sort(key=lambda x: os.path.getmtime(x), reverse=True)
     return photos
+
+
+def mirror_image(src_path: str, dst_path: str) -> str:
+    """
+    Flip gambar secara horizontal (mirror).
+
+    Args:
+        src_path: Path foto sumber
+        dst_path: Path foto tujuan (mirrored)
+
+    Returns:
+        Path foto yang sudah di-mirror
+    """
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    img = Image.open(src_path)
+    try:
+        mirrored = img.transpose(Image.FLIP_LEFT_RIGHT)
+    finally:
+        img.close()
+
+    try:
+        dst_ext = os.path.splitext(dst_path)[1].lower()
+        if dst_ext in (".jpg", ".jpeg"):
+            mirrored.convert("RGB").save(dst_path, "JPEG", quality=95)
+        elif dst_ext == ".png":
+            mirrored.save(dst_path, "PNG")
+        elif dst_ext == ".webp":
+            mirrored.save(dst_path, "WEBP", quality=95)
+        else:
+            mirrored.convert("RGB").save(dst_path, "JPEG", quality=95)
+    finally:
+        mirrored.close()
+
+    return dst_path
+
+
+def apply_warm_filter(src_path: str, dst_path: str, intensity: float = 0.03) -> str:
+    """
+    Tambahkan efek warm color ke foto.
+    Menambah sedikit tone merah/kuning dan mengurangi biru
+    untuk memberikan kesan hangat.
+
+    Args:
+        src_path: Path foto sumber
+        dst_path: Path foto tujuan (warm filtered)
+        intensity: Intensitas efek warm (0.0 - 1.0), default 0.03 = 3%
+
+    Returns:
+        Path foto yang sudah diberi warm filter
+    """
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    img = Image.open(src_path).convert("RGB")
+    try:
+        r, g, b = img.split()
+
+        # Tambah merah dan kurangi biru sesuai intensitas
+        r_boost = int(255 * intensity)   # tambah merah
+        b_reduce = int(255 * intensity)  # kurangi biru
+
+        r = r.point(lambda x: min(255, x + r_boost))
+        b = b.point(lambda x: max(0, x - b_reduce))
+
+        warm_img = Image.merge("RGB", (r, g, b))
+
+        # Sedikit naikkan color temperature via warmth
+        enhancer = ImageEnhance.Color(warm_img)
+        warm_img = enhancer.enhance(1.0 + intensity * 0.5)
+
+        dst_ext = os.path.splitext(dst_path)[1].lower()
+        if dst_ext in (".jpg", ".jpeg"):
+            warm_img.save(dst_path, "JPEG", quality=95)
+        elif dst_ext == ".png":
+            warm_img.convert("RGBA").save(dst_path, "PNG")
+        elif dst_ext == ".webp":
+            warm_img.save(dst_path, "WEBP", quality=95)
+        else:
+            warm_img.save(dst_path, "JPEG", quality=95)
+    finally:
+        img.close()
+
+    return dst_path
 
 
 @functools.lru_cache(maxsize=64)
@@ -124,7 +205,7 @@ def _calc_font_size_for_width(text: str, target_width: int,
     return best
 
 
-def add_watermark(src_path: str, dst_path: str, text: str = "www.roxy.my.id",
+def add_watermark(src_path: str, dst_path: str, text: str = "https://www.kumpulenak.web.id",
                   opacity: float = 0.8, width_ratio: float = 0.8) -> str:
     """
     Tambahkan watermark teks ke foto.
@@ -158,7 +239,7 @@ def add_watermark(src_path: str, dst_path: str, text: str = "www.roxy.my.id",
         draw = ImageDraw.Draw(watermark_layer)
         
         # Dapatkan ukuran teks
-        padding_bottom = 20
+        padding_bottom = int(height * 0.08)
         
         try:
             bbox = draw.textbbox((0, 0), text, font=font)
@@ -291,9 +372,9 @@ def optimize_image(src_path: str, dst_path: str,
 def prepare_photo(photo_path: str, foto_folder: str, config: dict) -> str:
     """
     Pipeline lengkap pemrosesan foto sebelum upload:
-    foto asli → watermark → optimasi → siap upload.
+    foto asli → mirror → warm filter 3% → watermark → optimasi → siap upload.
     
-    Jika versi watermarked/optimized sudah ada, skip proses tersebut.
+    Jika versi processed sudah ada, skip proses tersebut.
     
     Args:
         photo_path: Path lengkap ke foto asli
@@ -307,48 +388,82 @@ def prepare_photo(photo_path: str, foto_folder: str, config: dict) -> str:
     name_without_ext = os.path.splitext(filename)[0]
     ext = os.path.splitext(filename)[1].lower()
     
-    # Path subfolder
+    # Path subfolder untuk setiap tahap
+    mirrored_dir = os.path.join(foto_folder, "mirrored")
+    warmed_dir = os.path.join(foto_folder, "warmed")
     watermarked_dir = os.path.join(foto_folder, "watermarked")
     optimized_dir = os.path.join(foto_folder, "optimized")
+    os.makedirs(mirrored_dir, exist_ok=True)
+    os.makedirs(warmed_dir, exist_ok=True)
     os.makedirs(watermarked_dir, exist_ok=True)
     os.makedirs(optimized_dir, exist_ok=True)
     
-    # Step 1: Watermark
+    # GIF → disimpan sebagai JPEG
+    if ext == ".gif":
+        proc_filename = name_without_ext + ".jpg"
+    else:
+        proc_filename = filename
+    
+    # Step 1: Mirror (flip horizontal)
+    mirrored_path = os.path.join(mirrored_dir, proc_filename)
+    if not os.path.exists(mirrored_path):
+        mirrored_path = mirror_image(
+            src_path=photo_path,
+            dst_path=mirrored_path,
+        )
+    
+    # Step 2: Warm filter 3%
+    warmed_path = os.path.join(warmed_dir, proc_filename)
+    if not os.path.exists(warmed_path):
+        warmed_path = apply_warm_filter(
+            src_path=mirrored_path,
+            dst_path=warmed_path,
+            intensity=0.03,
+        )
+    
+    # Step 3: Watermark
     watermark_text = config.get("watermark_text", "www.kumpulenak.web.id")
     watermark_opacity = config.get("watermark_opacity", 0.8)
     watermark_width_ratio = config.get("watermark_width_ratio", 0.8)
     
-    # GIF → disimpan sebagai JPEG setelah watermark
-    if ext == ".gif":
-        wm_filename = name_without_ext + ".jpg"
-    else:
-        wm_filename = filename
-    watermarked_path = os.path.join(watermarked_dir, wm_filename)
-    
-    # Cek apakah versi watermarked sudah ada
+    watermarked_path = os.path.join(watermarked_dir, proc_filename)
     if not os.path.exists(watermarked_path):
         watermarked_path = add_watermark(
-            src_path=photo_path,
+            src_path=warmed_path,
             dst_path=watermarked_path,
             text=watermark_text,
             opacity=watermark_opacity,
             width_ratio=watermark_width_ratio,
         )
     
-    # Step 2: Optimasi
-    # Tentukan nama file optimized (mungkin berubah ekstensi ke .jpg)
+    # Step 4: Optimasi
     if ext in (".png", ".webp", ".gif"):
         optimized_filename = name_without_ext + ".jpg"
     else:
         optimized_filename = filename
     
     optimized_path = os.path.join(optimized_dir, optimized_filename)
-    
-    # Cek apakah versi optimized sudah ada
     if not os.path.exists(optimized_path):
         optimized_path = optimize_image(
             src_path=watermarked_path,
             dst_path=optimized_path,
         )
+    
+    # Step 5: Cleanup — hapus file intermediate untuk hemat disk
+    if os.path.exists(optimized_path):
+        for tmp_path in (mirrored_path, warmed_path, watermarked_path):
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+        
+        # Hapus folder intermediate jika sudah kosong
+        for tmp_dir in (mirrored_dir, warmed_dir, watermarked_dir):
+            try:
+                if os.path.isdir(tmp_dir) and not os.listdir(tmp_dir):
+                    os.rmdir(tmp_dir)
+            except OSError:
+                pass
     
     return optimized_path
